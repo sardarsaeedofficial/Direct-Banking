@@ -1,0 +1,36 @@
+{
+  "name": "direct-banking",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Direct Banking — personal direct-debit, income, expenditure and cashflow management. Records and forecasts money; it never moves it.",
+  "packageManager": "pnpm@11.3.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "prisma:generate": "prisma generate",
+    "db:migrate": "prisma migrate deploy",
+    "db:migrate:dev": "prisma migrate dev",
+    "db:seed": "tsx prisma/seed.ts",
+    "build": "pnpm run prisma:generate && pnpm -C packages/shared run build && pnpm -C packages/web run build && pnpm -C packages/server run build && pnpm run copy:web",
+    "copy:web": "tsx scripts/copy-web.ts",
+    "start": "node packages/server/dist/index.js",
+    "dev": "pnpm run prisma:generate && concurrently -k -n api,web -c blue,magenta \"pnpm -C packages/server run dev\" \"pnpm -C packages/web run dev\"",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "lint": "pnpm -r run lint"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "concurrently": "^9.1.0",
+    "prisma": "^5.22.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0"
+  }
+}

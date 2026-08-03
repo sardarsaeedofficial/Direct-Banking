@@ -1,0 +1,447 @@
+// Direct Banking — Prisma schema
+// Money is stored as integer minor units (pence) using BigInt to avoid float drift.
+// History is never overwritten: future payments generate idempotently, refunds and
+// merchant re-links create NEW rows that link back to the originals.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Enums ----------
+enum AccountType {
+  CURRENT
+  SAVINGS
+  CREDIT_CARD
+  LOAN
+  CASH
+  OTHER
+}
+
+enum TxnDirection {
+  INCOME
+  EXPENSE
+  TRANSFER
+}
+
+enum TxnStatus {
+  PENDING
+  COMPLETED
+  REFUNDED
+  CANCELLED
+}
+
+enum TxnSource {
+  MANUAL
+  CSV_IMPORT
+  NOTIFICATION
+  OPEN_BANKING
+}
+
+enum RecurringType {
+  DIRECT_DEBIT
+  STANDING_ORDER
+  SUBSCRIPTION
+  CARD_RECURRING
+  RENT
+  LOAN
+  INSURANCE
+  COUNCIL_TAX
+  MANUAL
+}
+
+enum Frequency {
+  WEEKLY
+  FORTNIGHTLY
+  FOUR_WEEKLY
+  MONTHLY
+  QUARTERLY
+  BIANNUAL
+  ANNUAL
+  CUSTOM
+}
+
+enum RecurringStatus {
+  ACTIVE
+  PAUSED
+  ENDED
+}
+
+enum ExpectedStatus {
+  PROJECTED
+  DUE
+  MATCHED
+  PAID
+  SKIPPED
+  OVERDUE
+}
+
+enum ReminderChannel {
+  IN_APP
+  EMAIL
+  PUSH
+}
+
+enum ReminderStatus {
+  SCHEDULED
+  SENT
+  DISMISSED
+  FAILED
+}
+
+enum ImportStatus {
+  PENDING
+  PREVIEW
+  COMMITTED
+  ROLLED_BACK
+  FAILED
+}
+
+enum NotifStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum BudgetPeriod {
+  MONTHLY
+  YEARLY
+}
+
+// ---------- Core identity ----------
+model User {
+  id               String   @id @default(cuid())
+  email            String   @unique
+  passwordHash     String
+  displayName      String?
+  baseCurrency     String   @default("GBP")
+  locale           String   @default("en-GB")
+  twoFactorSecret  String?
+  twoFactorEnabled Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  sessions      Session[]
+  accounts      BankAccount[]
+  merchants     Merchant[]
+  categories    Category[]
+  transactions  Transaction[]
+  recurring     RecurringPayment[]
+  expected      ExpectedPayment[]
+  budgets       Budget[]
+  reminders     Reminder[]
+  importBatches ImportBatch[]
+  notifications NotificationImport[]
+  attachments   Attachment[]
+  auditLogs     AuditLog[]
+  settings      AppSetting[]
+}
+
+model Session {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String   @unique
+  csrfSecret String
+  userAgent  String?
+  ip         String?
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ---------- Banking domain ----------
+model BankAccount {
+  id           String      @id @default(cuid())
+  userId       String
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bankName     String
+  nickname     String
+  accountType  AccountType @default(CURRENT)
+  lastFour     String?
+  currency     String      @default("GBP")
+  balanceMinor BigInt      @default(0)
+  colour       String      @default("#2563eb")
+  icon         String?
+  isArchived   Boolean     @default(false)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  transactions Transaction[]      @relation("AccountTransactions")
+  transfersIn  Transaction[]      @relation("TransferCounterparty")
+  recurring    RecurringPayment[]
+  expected     ExpectedPayment[]
+
+  @@index([userId])
+}
+
+model Merchant {
+  id                String   @id @default(cuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  displayName       String
+  normalisedKey     String
+  logo              String?
+  defaultCategoryId String?
+  defaultCategory   Category? @relation(fields: [defaultCategoryId], references: [id])
+  createdAt         DateTime @default(now())
+
+  transactions Transaction[]
+  recurring    RecurringPayment[]
+
+  @@unique([userId, normalisedKey])
+  @@index([userId])
+}
+
+model Category {
+  id       String  @id @default(cuid())
+  userId   String
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name     String
+  colour   String  @default("#64748b")
+  icon     String?
+  parentId String?
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryTree")
+
+  transactions Transaction[]
+  recurring    RecurringPayment[]
+  budgets      Budget[]
+  merchants    Merchant[]
+
+  @@unique([userId, name])
+}
+
+model Transaction {
+  id          String       @id @default(cuid())
+  userId      String
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountId   String
+  account     BankAccount  @relation("AccountTransactions", fields: [accountId], references: [id])
+  direction   TxnDirection
+  status      TxnStatus    @default(COMPLETED)
+  source      TxnSource    @default(MANUAL)
+  amountMinor BigInt
+  currency    String       @default("GBP")
+  bookedAt    DateTime
+  description String
+  notes       String?
+  tags        String[]     @default([])
+
+  merchantId String?
+  merchant   Merchant? @relation(fields: [merchantId], references: [id])
+  categoryId String?
+  category   Category? @relation(fields: [categoryId], references: [id])
+
+  // transfers between the user's own accounts
+  transferAccountId String?
+  transferAccount   BankAccount? @relation("TransferCounterparty", fields: [transferAccountId], references: [id])
+
+  // split transactions (parent -> children)
+  parentId String?
+  parent   Transaction?  @relation("TxnSplit", fields: [parentId], references: [id])
+  splits   Transaction[] @relation("TxnSplit")
+
+  // refunds link back to the original
+  refundOfId String?
+  refundOf   Transaction?  @relation("TxnRefund", fields: [refundOfId], references: [id])
+  refunds    Transaction[] @relation("TxnRefund")
+
+  // provenance / dedupe
+  expectedPaymentId String?
+  expectedPayment   ExpectedPayment? @relation(fields: [expectedPaymentId], references: [id])
+  importBatchId     String?
+  importBatch       ImportBatch?     @relation(fields: [importBatchId], references: [id])
+  dedupeHash        String?
+
+  attachments Attachment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, bookedAt])
+  @@index([accountId, bookedAt])
+  @@index([merchantId])
+  @@index([userId, dedupeHash])
+}
+
+model RecurringPayment {
+  id                  String           @id @default(cuid())
+  userId              String
+  user                User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type                RecurringType    @default(DIRECT_DEBIT)
+  merchantId          String?
+  merchant            Merchant?        @relation(fields: [merchantId], references: [id])
+  merchantName        String
+  accountId           String
+  account             BankAccount      @relation(fields: [accountId], references: [id])
+  expectedAmountMinor BigInt
+  isVariable          Boolean          @default(false)
+  currency            String           @default("GBP")
+  frequency           Frequency        @default(MONTHLY)
+  dayOfMonth          Int?
+  intervalDays        Int?
+  nextDueDate         DateTime
+  startDate           DateTime
+  endDate             DateTime?
+  categoryId          String?
+  category            Category?        @relation(fields: [categoryId], references: [id])
+  reminderDays        Int              @default(5)
+  status              RecurringStatus  @default(ACTIVE)
+  notes               String?
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+
+  expected  ExpectedPayment[]
+  reminders Reminder[]
+
+  @@index([userId, status])
+  @@index([nextDueDate])
+}
+
+model ExpectedPayment {
+  id                  String          @id @default(cuid())
+  userId              String
+  user                User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recurringId         String
+  recurring           RecurringPayment @relation(fields: [recurringId], references: [id], onDelete: Cascade)
+  accountId           String
+  account             BankAccount     @relation(fields: [accountId], references: [id])
+  dueDate             DateTime
+  expectedAmountMinor BigInt
+  status              ExpectedStatus  @default(PROJECTED)
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  matchedTransactions Transaction[]
+  reminders           Reminder[]
+
+  @@unique([recurringId, dueDate])
+  @@index([userId, dueDate])
+  @@index([status, dueDate])
+}
+
+model Budget {
+  id         String       @id @default(cuid())
+  userId     String
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String
+  categoryId String?
+  category   Category?    @relation(fields: [categoryId], references: [id])
+  period     BudgetPeriod @default(MONTHLY)
+  limitMinor BigInt
+  currency   String       @default("GBP")
+  startDate  DateTime
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  @@index([userId])
+}
+
+model ImportBatch {
+  id             String       @id @default(cuid())
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  filename       String?
+  source         TxnSource    @default(CSV_IMPORT)
+  status         ImportStatus @default(PENDING)
+  columnMapping  Json?
+  rowCount       Int          @default(0)
+  importedCount  Int          @default(0)
+  duplicateCount Int          @default(0)
+  createdAt      DateTime     @default(now())
+  committedAt    DateTime?
+  rolledBackAt   DateTime?
+
+  transactions Transaction[]
+
+  @@index([userId])
+}
+
+model NotificationImport {
+  id                String      @id @default(cuid())
+  userId            String
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourcePackage     String
+  title             String
+  message           String
+  receivedAt        DateTime
+  parsedMerchant    String?
+  parsedAmountMinor BigInt?
+  parsedAccount     String?
+  confidence        Float       @default(0)
+  sourceHash        String
+  status            NotifStatus @default(PENDING)
+  createdAt         DateTime    @default(now())
+
+  @@unique([userId, sourceHash])
+  @@index([userId, status])
+}
+
+model Reminder {
+  id                String            @id @default(cuid())
+  userId            String
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recurringId       String?
+  recurring         RecurringPayment? @relation(fields: [recurringId], references: [id], onDelete: Cascade)
+  expectedPaymentId String?
+  expectedPayment   ExpectedPayment?  @relation(fields: [expectedPaymentId], references: [id], onDelete: Cascade)
+  channel           ReminderChannel   @default(IN_APP)
+  status            ReminderStatus    @default(SCHEDULED)
+  fireAt            DateTime
+  sentAt            DateTime?
+  message           String?
+  createdAt         DateTime          @default(now())
+
+  @@unique([expectedPaymentId, channel])
+  @@index([status, fireAt])
+  @@index([userId, status])
+}
+
+model Attachment {
+  id            String       @id @default(cuid())
+  userId        String
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactionId String?
+  transaction   Transaction? @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  filename      String
+  mimeType      String
+  sizeBytes     Int
+  storageKey    String
+  createdAt     DateTime     @default(now())
+
+  @@index([userId])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String
+  entityType String?
+  entityId   String?
+  ip         String?
+  userAgent  String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([entityType, entityId])
+}
+
+model AppSetting {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, key])
+}
