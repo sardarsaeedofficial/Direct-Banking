@@ -46,18 +46,53 @@ direct-banking/
 
 ## Local development
 
-**Prerequisites:** Node ≥ 20, pnpm, and a PostgreSQL database.
+**Prerequisites:** Node ≥ 20, pnpm, and Docker Desktop (for the local PostgreSQL).
 
-```bash
+### Quick start (Windows PowerShell)
+
+```powershell
+# 1. Install dependencies
 pnpm install --frozen-lockfile
-cp .env.example .env            # then edit DATABASE_URL and SESSION_SECRET
+
+# 2. Create your .env from the template (safe dev defaults are pre-filled)
+Copy-Item .env.example .env
+#    then open .env and set a long random SESSION_SECRET, e.g.:
+node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+
+# 3. Start PostgreSQL 16 in Docker (named volume + health check)
+pnpm db:up
+#    wait until healthy:
+docker compose ps
+
+# 4. Generate the Prisma client and create the schema
 pnpm prisma:generate
-pnpm db:migrate:dev             # create the schema in your database
-pnpm db:seed                    # OPTIONAL: dev-only sample data (see below)
-pnpm dev                        # API on :8080, Vite dev server on :5173 (proxies /api)
+pnpm db:migrate:dev
+
+# 5. (Optional) load dev-only sample data, incl. the Helifica example
+pnpm db:seed
+
+# 6. Run the app (API on :8080, Vite dev server on :5173 which proxies /api)
+pnpm dev
 ```
 
-Open http://localhost:5173.
+Open http://localhost:5173. Sign in with the seeded demo account: `demo@direct-banking.local` / `demopassword1`.
+
+### Database helper scripts
+
+| Script | What it does |
+| --- | --- |
+| `pnpm db:up` | Start PostgreSQL 16 via docker-compose (detached) |
+| `pnpm db:down` | Stop the database container (data is kept in the named volume) |
+| `pnpm db:logs` | Tail the database logs |
+| `pnpm db:migrate:dev` | Apply Prisma migrations to your dev database |
+| `pnpm db:migrate` | Apply migrations in production (`prisma migrate deploy`) |
+| `pnpm db:seed` | Load dev-only sample data |
+
+To wipe the database entirely (including the volume): `docker compose down -v`.
+
+> The compose file reads `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` and
+> `POSTGRES_PORT` from your `.env`. Safe development defaults are provided; no
+> production credentials are ever hard-coded. `.env` is git-ignored.
 
 ### Development seed (never runs in production)
 

@@ -1,0 +1,29 @@
+# Local development PostgreSQL for Direct Banking.
+# Credentials come from your .env (safe dev defaults are provided below via the
+# ${VAR:-default} syntax). Never commit real/production credentials — set those
+# only in your deployment platform's secret store.
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: direct-banking-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-directbanking}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
+      POSTGRES_DB: ${POSTGRES_DB:-direct_banking}
+    ports:
+      # Host port is configurable so it won't clash with an existing Postgres.
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-directbanking} -d ${POSTGRES_DB:-direct_banking}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  db-data:
+    name: direct-banking-db-data
