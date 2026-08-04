@@ -87,8 +87,13 @@ Open http://localhost:5173. Sign in with the seeded demo account: `demo@direct-b
 | `pnpm db:migrate:dev` | Apply Prisma migrations to your dev database |
 | `pnpm db:migrate` | Apply migrations in production (`prisma migrate deploy`) |
 | `pnpm db:seed` | Load dev-only sample data |
+| `pnpm db:reset` | **Dev only.** Wipe local data, re-migrate and re-seed (guarded: refuses in production / non-local DBs, requires typed confirmation) |
 
 To wipe the database entirely (including the volume): `docker compose down -v`.
+
+> `pnpm db:reset` refuses to run when `NODE_ENV=production` or when `DATABASE_URL`
+> is not local, warns that all data will be deleted, and requires you to type
+> `reset` to confirm (use `--force` or `DB_RESET_CONFIRM=reset` for automation).
 
 > The compose file reads `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` and
 > `POSTGRES_PORT` from your `.env`. Safe development defaults are provided; no

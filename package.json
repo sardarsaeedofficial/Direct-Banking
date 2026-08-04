@@ -14,6 +14,7 @@
     "db:logs": "docker compose logs -f db",
     "db:migrate": "prisma migrate deploy",
     "db:migrate:dev": "prisma migrate dev",
+    "db:reset": "tsx scripts/db-reset.ts",
     "db:seed": "tsx prisma/seed.ts",
     "build": "pnpm run prisma:generate && pnpm -C packages/shared run build && pnpm -C packages/web run build && pnpm -C packages/server run build && pnpm run copy:web",
     "copy:web": "tsx scripts/copy-web.ts",
