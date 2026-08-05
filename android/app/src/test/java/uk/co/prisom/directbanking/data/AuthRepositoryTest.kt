@@ -9,6 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import uk.co.prisom.directbanking.data.remote.ApiClients
 import uk.co.prisom.directbanking.data.remote.MobileApi
+import uk.co.prisom.directbanking.data.remote.SessionRefresher
 import uk.co.prisom.directbanking.data.remote.dto.TokenResponse
 import uk.co.prisom.directbanking.data.repository.AuthRepository
 import java.io.IOException
@@ -17,7 +18,8 @@ class AuthRepositoryTest {
 
     private fun repo(publicApi: MobileApi, store: FakeTokenStore): AuthRepository {
         val authApi = mockk<MobileApi>(relaxed = true)
-        return AuthRepository(ApiClients(authApi = authApi, publicApi = publicApi), store, "1.0-test")
+        val refresher = SessionRefresher(publicApi, store)
+        return AuthRepository(ApiClients(authApi = authApi, publicApi = publicApi, refresher = refresher), store, "1.0-test")
     }
 
     @Test

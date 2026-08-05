@@ -9,8 +9,8 @@ import retrofit2.converter.kotlinx.serialization.asConverterFactory
 import uk.co.prisom.directbanking.data.local.security.TokenStore
 import java.util.concurrent.TimeUnit
 
-/** Both API bindings: [publicApi] (no auth, for login/refresh) and [authApi]. */
-class ApiClients(val authApi: MobileApi, val publicApi: MobileApi)
+/** Both API bindings plus the shared single-flight refresher. */
+class ApiClients(val authApi: MobileApi, val publicApi: MobileApi, val refresher: SessionRefresher)
 
 object ApiFactory {
 
@@ -33,12 +33,13 @@ object ApiFactory {
             .build()
 
         val publicApi = retrofit(baseUrl, baseClient).create(MobileApi::class.java)
+        val refresher = SessionRefresher(publicApi, tokenStore)
         val authClient = baseClient.newBuilder()
             .addInterceptor(AuthInterceptor(tokenStore))
-            .authenticator(TokenAuthenticator(tokenStore, publicApi))
+            .authenticator(TokenAuthenticator(tokenStore, refresher))
             .build()
         val authApi = retrofit(baseUrl, authClient).create(MobileApi::class.java)
-        return ApiClients(authApi = authApi, publicApi = publicApi)
+        return ApiClients(authApi = authApi, publicApi = publicApi, refresher = refresher)
     }
 
     private fun retrofit(baseUrl: String, client: OkHttpClient): Retrofit =

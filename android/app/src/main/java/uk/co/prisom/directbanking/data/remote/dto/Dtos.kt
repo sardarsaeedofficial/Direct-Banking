@@ -138,3 +138,24 @@ data class NotifImportPatchRequest(
 @Serializable data class TransactionDto(val id: String, val amountMinor: Long? = null, val direction: String? = null)
 @Serializable data class NotifImportPatchResponse(val import: NotifImportDto, val transaction: TransactionDto? = null)
 @Serializable data class DeletedResponse(val deleted: Boolean = false)
+
+// Transactions list (read-only mobile dashboard) --------------------------------
+@Serializable data class TxnAccountRef(val nickname: String? = null)
+@Serializable data class TxnCategoryRef(val name: String? = null)
+@Serializable data class TxnMerchantRef(val displayName: String? = null)
+
+@Serializable
+data class TransactionItemDto(
+    val id: String,
+    val amountMinor: Long = 0,
+    val direction: String = "EXPENSE",
+    val currency: String = "GBP",
+    val description: String? = null,
+    val bookedAt: String? = null,
+    val status: String = "COMPLETED",
+    val account: TxnAccountRef? = null,
+    val category: TxnCategoryRef? = null,
+    val merchant: TxnMerchantRef? = null,
+)
+
+@Serializable data class TransactionListResponse(val items: List<TransactionItemDto> = emptyList(), val count: Int = 0)

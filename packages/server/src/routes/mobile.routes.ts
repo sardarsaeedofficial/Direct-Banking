@@ -133,6 +133,29 @@ mobileRouter.get(
   }),
 );
 
+// ── Transactions (read-only list for the mobile dashboard) ──────────────────
+
+mobileRouter.get(
+  "/transactions",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const accountId = typeof req.query.accountId === "string" ? req.query.accountId : undefined;
+    const items = await prisma.transaction.findMany({
+      where: { userId, parentId: null, accountId },
+      include: {
+        account: { select: { nickname: true } },
+        category: { select: { name: true } },
+        merchant: { select: { displayName: true } },
+      },
+      orderBy: { bookedAt: "desc" },
+      take: limit,
+    });
+    res.json({ items, count: items.length });
+  }),
+);
+
 // ── Notification imports ────────────────────────────────────────────────────
 
 mobileRouter.post(
