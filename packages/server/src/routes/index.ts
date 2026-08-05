@@ -16,12 +16,16 @@ import { importsRouter } from "./imports.routes.js";
 import { notificationsRouter } from "./notifications.routes.js";
 import { reportsRouter } from "./reports.routes.js";
 import { settingsRouter } from "./settings.routes.js";
+import { mobileRouter } from "./mobile.routes.js";
 
 export const apiRouter = Router();
 
 // Public endpoints.
 apiRouter.use(healthRouter);
 apiRouter.use("/auth", authRouter);
+
+// Native mobile API (versioned). Uses its own bearer-token auth, not cookies.
+apiRouter.use("/mobile/v1", mobileRouter);
 
 // Everything below requires a valid session.
 const protectedRouter = Router();

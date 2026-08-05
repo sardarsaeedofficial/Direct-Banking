@@ -1,0 +1,25 @@
+# Built output
+/build
+/app/build
+/*/build
+
+# Gradle
+.gradle
+/local.properties
+/captures
+
+# Signing — never commit keys or credentials
+keystore.properties
+*.jks
+*.keystore
+
+# Release/debug artifacts
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# IDE
+.idea
+*.iml
+.DS_Store

@@ -25,3 +25,17 @@ Thumbs.db
 
 # test / coverage
 coverage/
+
+# android
+android/build/
+android/**/build/
+android/.gradle/
+android/local.properties
+android/captures/
+# signing — never commit
+android/keystore.properties
+*.jks
+*.keystore
+# generated app artifacts — never commit
+*.apk
+*.aab
