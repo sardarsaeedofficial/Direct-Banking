@@ -29,6 +29,7 @@ import uk.co.prisom.directbanking.ui.screens.AccountsScreen
 import uk.co.prisom.directbanking.ui.screens.ApprovedSourcesScreen
 import uk.co.prisom.directbanking.ui.screens.CreateAccountScreen
 import uk.co.prisom.directbanking.ui.screens.DashboardScreen
+import uk.co.prisom.directbanking.ui.screens.DiagnosticsScreen
 import uk.co.prisom.directbanking.ui.screens.DirectDebitsScreen
 import uk.co.prisom.directbanking.ui.screens.DisclosureScreen
 import uk.co.prisom.directbanking.ui.screens.NotificationAccessScreen
@@ -42,6 +43,7 @@ import uk.co.prisom.directbanking.ui.screens.TransactionsScreen
 import uk.co.prisom.directbanking.ui.session.SessionState
 import uk.co.prisom.directbanking.ui.session.SessionViewModel
 import uk.co.prisom.directbanking.ui.vm.DashboardViewModel
+import uk.co.prisom.directbanking.ui.vm.DiagnosticsViewModel
 import uk.co.prisom.directbanking.ui.vm.OverviewViewModel
 import uk.co.prisom.directbanking.ui.vm.ReviewViewModel
 import uk.co.prisom.directbanking.ui.vm.SettingsViewModel
@@ -60,6 +62,7 @@ private object Routes {
     const val NOTIFICATIONS = "notifications"
     const val SYNC = "sync"
     const val ACCESS = "notificationaccess"
+    const val DIAGNOSTICS = "diagnostics"
     const val SIGN_IN = "signin"
     const val CREATE = "create"
 }
@@ -149,11 +152,15 @@ private fun MainNav(session: SessionViewModel) {
                     settings = containerViewModel { SettingsViewModel(it.authRepository, it.db) },
                     onManageSources = { nav.navigate(Routes.SOURCES) },
                     onNotificationAccess = { nav.navigate(Routes.ACCESS) },
+                    onDiagnostics = { nav.navigate(Routes.DIAGNOSTICS) },
                     debugRoute = DebugHooks.simulatorRoute,
                     onOpenDebug = { DebugHooks.simulatorRoute?.let { nav.navigate(it) } },
                 )
             }
             composable(Routes.ACCESS) { NotificationAccessScreen(onManageSources = { nav.navigate(Routes.SOURCES) }) }
+            composable(Routes.DIAGNOSTICS) {
+                DiagnosticsScreen(containerViewModel { DiagnosticsViewModel(it.diagnostics) })
+            }
             composable(Routes.ACCOUNTS) { AccountsScreen(containerViewModel { OverviewViewModel(it.dashboardRepository) }) }
             composable(Routes.DIRECT_DEBITS) { DirectDebitsScreen(containerViewModel { OverviewViewModel(it.dashboardRepository) }) }
             composable(Routes.NOTIFICATIONS) { NotificationsScreen() }

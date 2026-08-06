@@ -12,6 +12,23 @@ class ParserRegistryTest {
     private val registry = ParserRegistry()
 
     @Test
+    fun `real Monzo incoming payment is a credit`() {
+        // "money from <name>" is incoming even though the rail text says "Sent from Revolut".
+        val r = registry.parse(NotificationInput("co.uk.getmondo", 1L, title = "Monzo", text = "💸 £50 from Sardar Saeed: Sent from Revolut"))!!
+        assertEquals(TransactionDirection.INCOME, r.direction)
+        assertEquals(5000L, r.amountMinor)
+        assertEquals("GBP", r.currency)
+    }
+
+    @Test
+    fun `real Revolut outgoing payment is a debit`() {
+        val r = registry.parse(NotificationInput("com.revolut.revolut", 1L, title = "Revolut", text = "You sent £50 to Sardar Saeed 💸"))!!
+        assertEquals(TransactionDirection.EXPENSE, r.direction)
+        assertEquals(5000L, r.amountMinor)
+        assertEquals("GBP", r.currency)
+    }
+
+    @Test
     fun `all fixtures parse as expected`() {
         val failures = mutableListOf<String>()
         for (f in NotificationFixtures.all) {

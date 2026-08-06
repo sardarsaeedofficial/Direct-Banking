@@ -6,7 +6,7 @@ import { requireCsrf } from "../auth/middleware.js";
 import { validate, validated } from "../middleware/validate.js";
 import { asyncHandler, HttpError } from "../middleware/error.js";
 import { audit } from "../services/audit.service.js";
-import { createTransaction } from "../services/transactions.service.js";
+import { createTransaction, reverseTransactionBalance } from "../services/transactions.service.js";
 
 export const transactionsRouter = Router();
 
@@ -87,18 +87,32 @@ transactionsRouter.put(
     const existing = await prisma.transaction.findFirst({ where: { id: req.params.id, userId: req.auth!.userId } });
     if (!existing) throw new HttpError(404, "Transaction not found");
     const data = res.locals.body as Record<string, unknown>;
-    const txn = await prisma.transaction.update({
-      where: { id: existing.id },
-      data: {
-        description: data.description as string | undefined,
-        notes: data.notes as string | undefined,
-        tags: data.tags as string[] | undefined,
-        status: data.status as never,
-        direction: data.direction as never,
-        categoryId: (data.categoryId as string | null | undefined) ?? undefined,
-        amountMinor: data.amountMinor !== undefined ? BigInt(data.amountMinor as number) : undefined,
-        bookedAt: data.bookedAt ? new Date(data.bookedAt as string) : undefined,
-      },
+    // Reverse the old balance effect and apply the new one atomically so amount/
+    // direction/status edits keep BankAccount.balanceMinor consistent.
+    const txn = await prisma.$transaction(async (tx) => {
+      await reverseTransactionBalance(tx, existing);
+      const updated = await tx.transaction.update({
+        where: { id: existing.id },
+        data: {
+          description: data.description as string | undefined,
+          notes: data.notes as string | undefined,
+          tags: data.tags as string[] | undefined,
+          status: data.status as never,
+          direction: data.direction as never,
+          categoryId: (data.categoryId as string | null | undefined) ?? undefined,
+          amountMinor: data.amountMinor !== undefined ? BigInt(data.amountMinor as number) : undefined,
+          bookedAt: data.bookedAt ? new Date(data.bookedAt as string) : undefined,
+        },
+      });
+      // Apply the new effect.
+      if (updated.status !== "CANCELLED") {
+        const delta = updated.direction === "INCOME" ? updated.amountMinor : -updated.amountMinor;
+        await tx.bankAccount.update({ where: { id: updated.accountId }, data: { balanceMinor: { increment: delta } } });
+        if (updated.transferAccountId) {
+          await tx.bankAccount.update({ where: { id: updated.transferAccountId }, data: { balanceMinor: { increment: -delta } } });
+        }
+      }
+      return updated;
     });
     await audit(req, "transaction.update", { entityType: "Transaction", entityId: txn.id });
     res.json(txn);
@@ -111,8 +125,11 @@ transactionsRouter.delete(
   asyncHandler(async (req, res) => {
     const existing = await prisma.transaction.findFirst({ where: { id: req.params.id, userId: req.auth!.userId } });
     if (!existing) throw new HttpError(404, "Transaction not found");
-    await prisma.transaction.deleteMany({ where: { parentId: existing.id } }); // remove split children too
-    await prisma.transaction.delete({ where: { id: existing.id } });
+    await prisma.$transaction(async (tx) => {
+      await tx.transaction.deleteMany({ where: { parentId: existing.id } }); // remove split children too
+      await reverseTransactionBalance(tx, existing); // keep the balance consistent
+      await tx.transaction.delete({ where: { id: existing.id } });
+    });
     await audit(req, "transaction.delete", { entityType: "Transaction", entityId: existing.id });
     res.json({ deleted: true });
   }),

@@ -256,6 +256,7 @@ fun SettingsScreen(
     settings: SettingsViewModel,
     onManageSources: () -> Unit,
     onNotificationAccess: () -> Unit,
+    onDiagnostics: () -> Unit,
     debugRoute: String?,
     onOpenDebug: () -> Unit,
 ) {
@@ -266,6 +267,8 @@ fun SettingsScreen(
         OutlinedButton(onClick = onManageSources, modifier = Modifier.fillMaxWidth()) { Text("Approved notification sources") }
         Spacer(Modifier.height(8.dp))
         OutlinedButton(onClick = onNotificationAccess, modifier = Modifier.fillMaxWidth()) { Text("Notification access") }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) { Text("Notification diagnostics") }
         Spacer(Modifier.height(8.dp))
         OutlinedButton(onClick = { settings.deleteLocalData() }, modifier = Modifier.fillMaxWidth()) { Text("Delete captured local data") }
         Spacer(Modifier.height(8.dp))
