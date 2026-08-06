@@ -76,7 +76,7 @@ class ImportRepositoryTest {
         val source = FakeSourceDao().apply { rows[pkg] = ApprovedSourceEntity(pkg, "Bank", approved = true, firstObservedMillis = 0, lastSeenMillis = 0) }
         val import = FakeImportDao(); val sync = FakeSyncDao()
         val result = repo(source, import, sync, disclosure = { false }).capture(cardRaw, "Bank")
-        assertTrue(result is CaptureResult.Ignored)
+        assertTrue(result is CaptureResult.ConsentDisabled)
         assertTrue("no content retained without consent", import.rows.isEmpty())
         assertTrue(sync.ops.isEmpty())
     }
@@ -119,7 +119,18 @@ class ImportRepositoryTest {
         val source = FakeSourceDao().apply { rows[pkg] = ApprovedSourceEntity(pkg, "Bank", approved = false, ignored = true, firstObservedMillis = 0, lastSeenMillis = 0) }
         val import = FakeImportDao(); val sync = FakeSyncDao()
         val result = repo(source, import, sync).capture(cardRaw, "Bank")
-        assertTrue(result is CaptureResult.Ignored)
+        assertTrue(result is CaptureResult.SourceIgnored)
         assertTrue(import.rows.isEmpty())
+    }
+
+    @Test
+    fun `duplicate notification is not stored twice`() = runTest {
+        val source = FakeSourceDao().apply { rows[pkg] = ApprovedSourceEntity(pkg, "Bank", approved = true, firstObservedMillis = 0, lastSeenMillis = 0) }
+        val import = FakeImportDao(); val sync = FakeSyncDao()
+        val r = repo(source, import, sync)
+        assertTrue(r.capture(cardRaw, "Bank") is CaptureResult.Stored)
+        val second = r.capture(cardRaw, "Bank") // same fingerprint
+        assertTrue(second is CaptureResult.Duplicate)
+        assertEquals(1, import.rows.size)
     }
 }

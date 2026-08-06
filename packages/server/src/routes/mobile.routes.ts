@@ -243,9 +243,9 @@ mobileRouter.patch(
     const body = validated<typeof notifImportPatchSchema>(res);
     const item = await prisma.notificationImport.findFirst({ where: { id: req.params.id, userId } });
     if (!item) throw new HttpError(404, "Import not found");
-    if (item.status === NotifStatus.APPROVED) throw new HttpError(409, "Already approved");
 
     if (body.action === "reject") {
+      if (item.status === NotifStatus.APPROVED) throw new HttpError(409, "Cannot reject an already-approved import");
       const updated = await prisma.notificationImport.update({ where: { id: item.id }, data: { status: NotifStatus.REJECTED } });
       res.json({ import: updated });
       return;
@@ -280,25 +280,50 @@ mobileRouter.patch(
     if (!account) throw new HttpError(404, "Account not found");
     if (amountMinor == null || amountMinor <= 0) throw new HttpError(400, "A positive amount is required");
 
-    const txn = await createTransaction(userId, {
-      accountId: body.accountId,
-      direction,
-      status: "COMPLETED",
-      source: "NOTIFICATION",
-      amountMinor,
-      currency: item.currency,
-      bookedAt: occurredAt,
-      description: merchant ?? item.title,
-      merchantName: merchant ?? item.parsedMerchant ?? item.title,
-      categoryId: body.categoryId ?? undefined,
-      notes: body.notes,
+    // Idempotent claim: only a PENDING import can be approved. The atomic status
+    // flip guarantees a repeated approval never creates a second transaction or
+    // double-counts the balance.
+    const claim = await prisma.notificationImport.updateMany({
+      where: { id: item.id, userId, status: NotifStatus.PENDING },
+      data: { status: NotifStatus.APPROVED },
     });
+    if (claim.count === 0) {
+      const current = await prisma.notificationImport.findFirst({ where: { id: item.id, userId } });
+      if (current?.status !== NotifStatus.APPROVED) throw new HttpError(409, "Import cannot be approved");
+      const existingTxn = current.approvedTransactionId
+        ? await prisma.transaction.findUnique({ where: { id: current.approvedTransactionId }, include: { merchant: true, category: true, account: true } })
+        : null;
+      res.status(200).json({ import: current, transaction: existingTxn, duplicate: true });
+      return;
+    }
 
-    const updated = await prisma.notificationImport.update({
-      where: { id: item.id },
-      data: { status: NotifStatus.APPROVED, approvedTransactionId: txn.id },
-    });
-    res.status(201).json({ import: updated, transaction: txn });
+    try {
+      const txn = await createTransaction(userId, {
+        accountId: body.accountId,
+        direction,
+        status: "COMPLETED",
+        source: "NOTIFICATION",
+        amountMinor,
+        currency: item.currency,
+        bookedAt: occurredAt,
+        description: merchant ?? item.title,
+        merchantName: merchant ?? item.parsedMerchant ?? item.title,
+        categoryId: body.categoryId ?? undefined,
+        notes: body.notes,
+      });
+      const updated = await prisma.notificationImport.update({
+        where: { id: item.id },
+        data: { approvedTransactionId: txn.id },
+      });
+      res.status(201).json({ import: updated, transaction: txn });
+    } catch (err) {
+      // A transient failure must leave the import reviewable (undo the claim).
+      await prisma.notificationImport.updateMany({
+        where: { id: item.id, userId, approvedTransactionId: null },
+        data: { status: NotifStatus.PENDING },
+      });
+      throw err;
+    }
   }),
 );
 

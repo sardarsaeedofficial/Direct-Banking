@@ -30,29 +30,42 @@ interface NotificationParser {
 
 /** Keyword-based direction detection shared by the generic parser and adapters. */
 object DirectionRules {
-    private val INCOME = listOf(
-        "refund", "refunded", "credited", "credit", "received", "deposit", "deposited",
-        "salary", "paid in", "cashback", "interest", "received from",
+    private val INCOME_WORDS = listOf(
+        "received", "credited", "credit", "deposit", "deposited", "salary", "cashback",
+        "interest", "paid in", "money in", "top up", "topped up", "added money", "you got",
     )
-    private val EXPENSE = listOf(
-        "debited", "debit", "card payment", "contactless", "payment to", "payment of",
-        "purchase", "spent", "withdrawal", "withdrew", "cash withdrawal", "direct debit",
-        "transfer to", "sent", "charged", "you paid",
+    private val EXPENSE_WORDS = listOf(
+        "you paid", "payment to", "payment of", "card payment", "contactless", "purchase",
+        "spent", "withdrawal", "withdrew", "cash withdrawal", "direct debit", "debited",
+        "debit", "charged", "transfer to",
     )
 
-    /** Returns the detected direction, or null if no clear signal. */
+    // "£50 from Sardar" (money received) — an amount immediately followed by "from".
+    private val AMOUNT_FROM = Regex("""(£|gbp|\d)[\d.,]*\s+from\s+\p{L}""", RegexOption.IGNORE_CASE)
+    // "You sent … to X" / "Sent £5 to X" (money out). NOT "Sent from <app>" (a rail).
+    private val SENT_TO = Regex("""\bsent\b(?![^.]*\bfrom\b)[^.]*\bto\b""")
+
+    /**
+     * Returns the detected direction, or null if no clear signal. Distinguishes
+     * outgoing "you sent … to" from incoming "£X from <name>", and treats
+     * "Sent from <app>" (payment-rail text) as noise rather than an outgoing signal.
+     */
     fun detect(text: String): TransactionDirection? {
         val t = text.lowercase()
-        // Refunds are income even if the text also says "payment".
         if (t.contains("refund")) return TransactionDirection.INCOME
-        if (t.contains("transfer to") || t.contains("sent to")) return TransactionDirection.EXPENSE
-        if (t.contains("received from") || t.contains("transfer from")) return TransactionDirection.INCOME
-        val income = INCOME.any { t.contains(it) }
-        val expense = EXPENSE.any { t.contains(it) }
+
+        val youSent = t.contains("you sent") || SENT_TO.containsMatchIn(t)
+        val incomeFrom = AMOUNT_FROM.containsMatchIn(t) || t.contains("received from") || t.contains("transfer from")
+
+        val income = INCOME_WORDS.any { t.contains(it) } || incomeFrom
+        val expense = EXPENSE_WORDS.any { t.contains(it) } || youSent
+
         return when {
             expense && !income -> TransactionDirection.EXPENSE
             income && !expense -> TransactionDirection.INCOME
-            expense -> TransactionDirection.EXPENSE // both present: default to spend
+            youSent -> TransactionDirection.EXPENSE // explicit "you sent … to" wins as outgoing
+            incomeFrom -> TransactionDirection.INCOME // else "amount from <name>" wins as incoming
+            expense -> TransactionDirection.EXPENSE // both, otherwise: default to spend
             income -> TransactionDirection.INCOME
             else -> null
         }

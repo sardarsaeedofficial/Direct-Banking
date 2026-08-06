@@ -19,17 +19,25 @@ import uk.co.prisom.directbanking.parsing.ParserRegistry
 import uk.co.prisom.directbanking.parsing.SourceFilter
 import java.time.Instant
 
+/** Outcome of processing one notification, with an exact human-readable [reason]. */
 sealed interface CaptureResult {
-    data object Ignored : CaptureResult
-    data object SourceNotApproved : CaptureResult
-    data object Unparsed : CaptureResult
+    val reason: String
+    data object Denylisted : CaptureResult { override val reason = "denylisted" }
+    data object ConsentDisabled : CaptureResult { override val reason = "consent disabled" }
+    data object SourceIgnored : CaptureResult { override val reason = "source permanently ignored" }
+    data object SourceNotApproved : CaptureResult { override val reason = "source unapproved" }
+    data object EmptyText : CaptureResult { override val reason = "empty text" }
+    data object Unparsed : CaptureResult { override val reason = "unsupported package / parse failure" }
+    data object Duplicate : CaptureResult { override val reason = "duplicate" }
     data class Stored(
         val reviewState: String,
         val autoQueued: Boolean,
         val amountMinor: Long,
         val currency: String,
         val merchant: String?,
-    ) : CaptureResult
+    ) : CaptureResult {
+        override val reason: String get() = if (autoQueued) "queued ($reviewState)" else "stored ($reviewState)"
+    }
 }
 
 /**
@@ -55,17 +63,17 @@ class ImportRepository(
 
     suspend fun capture(raw: RawNotification, appLabel: String): CaptureResult {
         val input = NotificationInput(raw.packageName, raw.postTime, raw.title, raw.text, raw.bigText, raw.textLines, raw.subText)
-        if (!SourceFilter.passesBaseline(raw.packageName, input.combinedText)) return CaptureResult.Ignored
+        val combined = input.combinedText
 
-        // No processing at all without explicit disclosure consent.
-        if (!disclosureAccepted()) return CaptureResult.Ignored
-
-        // Permanently-ignored sources are dropped without recording anything more.
-        if (sourceDao.get(raw.packageName)?.ignored == true) return CaptureResult.Ignored
+        // Enforcement order (each yields an exact diagnostics reason):
+        if (!SourceFilter.passesBaseline(raw.packageName, combined)) return CaptureResult.Denylisted
+        if (!disclosureAccepted()) return CaptureResult.ConsentDisabled
+        if (sourceDao.get(raw.packageName)?.ignored == true) return CaptureResult.SourceIgnored
 
         // Record the source (label only — no notification text) so the user can approve it.
         recordObserved(raw.packageName, appLabel)
         if (sourceDao.isApproved(raw.packageName) != true) return CaptureResult.SourceNotApproved
+        if (combined.isBlank()) return CaptureResult.EmptyText
 
         val candidate = parser.parse(input) ?: return CaptureResult.Unparsed
         val userId = tokenStore.userId() ?: "local"
@@ -73,7 +81,9 @@ class ImportRepository(
             userId, tokenStore.deviceId, candidate.sourcePackage,
             candidate.amountMinor, candidate.direction, candidate.merchant, raw.postTime,
         )
-        val existing = importDao.byFingerprint(fingerprint)
+        // Deduplicate reposted/updated notifications by fingerprint.
+        if (importDao.byFingerprint(fingerprint) != null) return CaptureResult.Duplicate
+
         val reviewState = reviewStateFor(candidate.confidence)
         val entity = ParsedImportEntity(
             fingerprint = fingerprint,
@@ -88,13 +98,13 @@ class ImportRepository(
             reviewState = reviewState,
             redactedText = candidate.redactedSourceText,
             title = candidate.merchant ?: appLabel,
-            localStatus = existing?.localStatus ?: "LOCAL",
-            remoteId = existing?.remoteId,
-            createdAtMillis = existing?.createdAtMillis ?: clock(),
+            localStatus = "LOCAL",
+            remoteId = null,
+            createdAtMillis = clock(),
         )
         importDao.upsert(entity)
 
-        val autoQueued = candidate.confidence >= 0.60 && existing?.remoteId == null
+        val autoQueued = candidate.confidence >= 0.60
         if (autoQueued) enqueueCreate(entity)
         return CaptureResult.Stored(reviewState, autoQueued, candidate.amountMinor, candidate.currency, candidate.merchant)
     }

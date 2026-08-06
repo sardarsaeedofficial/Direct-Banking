@@ -93,7 +93,42 @@ export async function createTransaction(userId: string, input: CreateTxnInput) {
     expectedPaymentId: expectedPaymentId ?? undefined,
     importBatchId: input.importBatchId ?? undefined,
     dedupeHash: hash,
+    // Newly-created transactions always maintain the balance (unless cancelled).
+    balanceApplied: (input.status ?? "COMPLETED") !== "CANCELLED",
   };
 
-  return prisma.transaction.create({ data, include: { merchant: true, category: true, account: true } });
+  // Single source of truth: BankAccount.balanceMinor is the current balance and
+  // is adjusted atomically with the transaction so the dashboard total stays
+  // consistent (ledger = opening + credits − debits). CANCELLED rows don't move money.
+  const status = data.status ?? "COMPLETED";
+  return prisma.$transaction(async (tx) => {
+    const created = await tx.transaction.create({ data, include: { merchant: true, category: true, account: true } });
+    if (status !== "CANCELLED") {
+      const delta = input.direction === "INCOME" ? amountMinor : -amountMinor;
+      await tx.bankAccount.update({ where: { id: input.accountId }, data: { balanceMinor: { increment: delta } } });
+      // A transfer moves value to the counterparty account (net worth unchanged).
+      if (input.transferAccountId) {
+        await tx.bankAccount.update({ where: { id: input.transferAccountId }, data: { balanceMinor: { increment: -delta } } });
+      }
+    }
+    return created;
+  });
+}
+
+/**
+ * Reverse a transaction's balance effect (used when a transaction is edited or
+ * deleted). Only rows whose effect was actually applied (balanceApplied = true)
+ * are reversed, so legacy transactions created before balance maintenance never
+ * change account balances.
+ */
+export async function reverseTransactionBalance(
+  tx: Prisma.TransactionClient,
+  txn: { accountId: string; direction: string; amountMinor: bigint; transferAccountId: string | null; balanceApplied: boolean },
+) {
+  if (!txn.balanceApplied) return;
+  const delta = txn.direction === "INCOME" ? txn.amountMinor : -txn.amountMinor;
+  await tx.bankAccount.update({ where: { id: txn.accountId }, data: { balanceMinor: { increment: -delta } } });
+  if (txn.transferAccountId) {
+    await tx.bankAccount.update({ where: { id: txn.transferAccountId }, data: { balanceMinor: { increment: delta } } });
+  }
 }

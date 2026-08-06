@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uk.co.prisom.directbanking.data.DiagnosticsRepository
+import uk.co.prisom.directbanking.data.DiagnosticsSnapshot
 import uk.co.prisom.directbanking.data.local.AppPreferences
 import uk.co.prisom.directbanking.data.local.db.DirectBankingDatabase
 import uk.co.prisom.directbanking.data.local.db.ParsedImportEntity
@@ -140,6 +142,16 @@ class SourcesViewModel(
     fun ignore(pkg: String) = viewModelScope.launch { sourceRepository.setIgnored(pkg, true) }
     fun acceptDisclosure() = viewModelScope.launch { appPreferences.setDisclosureAccepted(true) }
     fun declineDisclosure() = viewModelScope.launch { appPreferences.setDisclosureAccepted(false) }
+}
+
+class DiagnosticsViewModel(
+    diagnostics: DiagnosticsRepository,
+) : ViewModel() {
+    val snapshot: StateFlow<DiagnosticsSnapshot> = diagnostics.state
+
+    /** User-initiated scan of currently visible notifications. Returns false if the listener isn't bound. */
+    fun scanVisibleNotifications(): Boolean =
+        uk.co.prisom.directbanking.notifications.BankNotificationListenerService.requestScan()
 }
 
 class SettingsViewModel(

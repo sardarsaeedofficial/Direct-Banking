@@ -3,6 +3,7 @@ package uk.co.prisom.directbanking.di
 import android.content.Context
 import kotlinx.coroutines.flow.first
 import uk.co.prisom.directbanking.BuildConfig
+import uk.co.prisom.directbanking.data.DiagnosticsRepository
 import uk.co.prisom.directbanking.data.local.AppPreferences
 import uk.co.prisom.directbanking.data.local.db.DirectBankingDatabase
 import uk.co.prisom.directbanking.data.local.security.SecureTokenStore
@@ -24,6 +25,7 @@ class AppContainer(context: Context) {
     val tokenStore: TokenStore = SecureTokenStore(appContext)
     val appPreferences = AppPreferences(appContext)
     val notifier = AppNotifier(appContext)
+    val diagnostics = DiagnosticsRepository()
     private val json = ApiFactory.json
     private val apiClients = ApiFactory.create(BuildConfig.API_BASE_URL, tokenStore, BuildConfig.DEBUG)
     val db = DirectBankingDatabase.build(appContext)
