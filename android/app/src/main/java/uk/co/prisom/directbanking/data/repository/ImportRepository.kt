@@ -45,6 +45,9 @@ class ImportRepository(
     private val tokenStore: TokenStore,
     private val parser: ParserRegistry,
     private val json: Json,
+    // Consent gate: the user must have accepted the in-app disclosure before any
+    // notification content is retained. Defaults to true for unit construction.
+    private val disclosureAccepted: suspend () -> Boolean = { true },
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
     fun observeReviewQueue(): Flow<List<ParsedImportEntity>> = importDao.observeReviewQueue()
@@ -53,6 +56,9 @@ class ImportRepository(
     suspend fun capture(raw: RawNotification, appLabel: String): CaptureResult {
         val input = NotificationInput(raw.packageName, raw.postTime, raw.title, raw.text, raw.bigText, raw.textLines, raw.subText)
         if (!SourceFilter.passesBaseline(raw.packageName, input.combinedText)) return CaptureResult.Ignored
+
+        // No processing at all without explicit disclosure consent.
+        if (!disclosureAccepted()) return CaptureResult.Ignored
 
         // Permanently-ignored sources are dropped without recording anything more.
         if (sourceDao.get(raw.packageName)?.ignored == true) return CaptureResult.Ignored

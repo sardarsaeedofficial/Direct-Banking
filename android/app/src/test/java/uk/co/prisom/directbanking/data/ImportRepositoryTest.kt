@@ -64,8 +64,22 @@ class ImportRepositoryTest {
     private val pkg = "com.example.simbank"
     private val cardRaw = RawNotification(pkg, 1_000L, null, null, "Bank", "You spent £12.45 at Tesco", null, emptyList(), null)
 
-    private fun repo(source: FakeSourceDao, import: FakeImportDao, sync: FakeSyncDao) =
-        ImportRepository(import, sync, source, FakeTokenStore(), ParserRegistry(), ApiFactory.json) { 5_000L }
+    private fun repo(
+        source: FakeSourceDao,
+        import: FakeImportDao,
+        sync: FakeSyncDao,
+        disclosure: suspend () -> Boolean = { true },
+    ) = ImportRepository(import, sync, source, FakeTokenStore(), ParserRegistry(), ApiFactory.json, disclosureAccepted = disclosure, clock = { 5_000L })
+
+    @Test
+    fun `nothing is captured before disclosure is accepted`() = runTest {
+        val source = FakeSourceDao().apply { rows[pkg] = ApprovedSourceEntity(pkg, "Bank", approved = true, firstObservedMillis = 0, lastSeenMillis = 0) }
+        val import = FakeImportDao(); val sync = FakeSyncDao()
+        val result = repo(source, import, sync, disclosure = { false }).capture(cardRaw, "Bank")
+        assertTrue(result is CaptureResult.Ignored)
+        assertTrue("no content retained without consent", import.rows.isEmpty())
+        assertTrue(sync.ops.isEmpty())
+    }
 
     @Test
     fun `unapproved source is not parsed or stored, only observed`() = runTest {

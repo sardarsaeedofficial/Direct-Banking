@@ -1,6 +1,7 @@
 package uk.co.prisom.directbanking.di
 
 import android.content.Context
+import kotlinx.coroutines.flow.first
 import uk.co.prisom.directbanking.BuildConfig
 import uk.co.prisom.directbanking.data.local.AppPreferences
 import uk.co.prisom.directbanking.data.local.db.DirectBankingDatabase
@@ -31,6 +32,9 @@ class AppContainer(context: Context) {
     val dashboardRepository = DashboardRepository(authRepository)
     val transactionRepository = TransactionRepository(apiClients)
     val sourceRepository = SourceRepository(db.sourceDao())
-    val importRepository = ImportRepository(db.importDao(), db.syncDao(), db.sourceDao(), tokenStore, ParserRegistry(), json)
+    val importRepository = ImportRepository(
+        db.importDao(), db.syncDao(), db.sourceDao(), tokenStore, ParserRegistry(), json,
+        disclosureAccepted = { appPreferences.disclosureAccepted.first() },
+    )
     val syncRepository = SyncRepository(apiClients.authApi, db.importDao(), db.syncDao(), json)
 }

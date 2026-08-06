@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [
@@ -13,7 +15,7 @@ import androidx.room.RoomDatabase
         ApprovedSourceEntity::class,
     ],
     version = 2,
-    exportSchema = false,
+    exportSchema = true,
 )
 abstract class DirectBankingDatabase : RoomDatabase() {
     abstract fun importDao(): ImportDao
@@ -22,9 +24,19 @@ abstract class DirectBankingDatabase : RoomDatabase() {
     abstract fun sourceDao(): SourceDao
 
     companion object {
+        /** v2 adds the user-controlled "permanently ignore" flag to approved_source. */
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `approved_source` ADD COLUMN `ignored` INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        val ALL_MIGRATIONS = arrayOf(MIGRATION_1_2)
+
         fun build(context: Context): DirectBankingDatabase =
             Room.databaseBuilder(context, DirectBankingDatabase::class.java, "directbanking.db")
-                .fallbackToDestructiveMigration()
+                // Explicit migrations only — never destroy user data in production.
+                .addMigrations(*ALL_MIGRATIONS)
                 .build()
     }
 }
