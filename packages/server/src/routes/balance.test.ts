@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 let ready = false;
 let server: Server | undefined;
 let base = "";
+let webBase = "";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let prisma: any;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -32,7 +33,9 @@ beforeAll(async () => {
     server = (await import("../app.js")).createApp().listen(0);
     await new Promise((r) => server!.once("listening", r));
     const addr = server.address();
-    base = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}/api/mobile/v1`;
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    base = `http://127.0.0.1:${port}/api/mobile/v1`;
+    webBase = `http://127.0.0.1:${port}/api`;
     ready = true;
   } catch {
     ready = false;
@@ -81,6 +84,41 @@ function patch(id: string, token: string, body: unknown) {
   });
 }
 
+// Web (cookie + CSRF) session for the transaction PUT/DELETE routes.
+async function webUserWithAccount(openingMinor: bigint) {
+  const email = `baltest+web${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
+  const reg = await fetch(webBase + "/auth/register", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, password: "password1234", displayName: "Web" }),
+  });
+  const cookie = (reg.headers.getSetCookie?.() ?? []).map((c: string) => c.split(";")[0]).join("; ");
+  const csrfToken = (await reg.json()).csrfToken as string;
+  const user = await prisma.user.findUnique({ where: { email } });
+  const account = await prisma.bankAccount.create({ data: { userId: user.id, bankName: "Test", nickname: "Everyday", balanceMinor: openingMinor } });
+  return { userId: user.id as string, accountId: account.id as string, cookie, csrfToken };
+}
+
+// A legacy transaction as it existed before balance maintenance (balanceApplied=false),
+// with the account balance set independently of it.
+async function legacyTxn(userId: string, accountId: string, amountMinor: number) {
+  return prisma.transaction.create({
+    data: {
+      userId, accountId, direction: "INCOME", status: "COMPLETED", amountMinor: BigInt(amountMinor),
+      currency: "GBP", bookedAt: new Date(), description: "Legacy", balanceApplied: false,
+      dedupeHash: `legacy-${Date.now()}-${Math.random()}`,
+    },
+  });
+}
+
+function webWrite(method: string, id: string, cookie: string, csrf: string, body?: unknown) {
+  return fetch(`${webBase}/transactions/${id}`, {
+    method,
+    headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
+
 describe("account balance stays consistent", () => {
   it("opening £20 + £50 credit = £70", async (ctx) => {
     if (!ready) return ctx.skip();
@@ -115,5 +153,44 @@ describe("account balance stays consistent", () => {
     const rej = await patch(imp.id, token, { action: "reject" });
     expect(rej.status).toBe(200);
     expect(await balance(accountId)).toBe(2000n);
+  });
+
+  it("deleting a legacy transaction does not change the balance", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const { userId, accountId, cookie, csrfToken } = await webUserWithAccount(2000n);
+    const legacy = await legacyTxn(userId, accountId, 5000);
+    const del = await webWrite("DELETE", legacy.id, cookie, csrfToken);
+    expect(del.status).toBe(200);
+    expect(await balance(accountId)).toBe(2000n); // untouched
+  });
+
+  it("editing a legacy transaction does not change the balance", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const { userId, accountId, cookie, csrfToken } = await webUserWithAccount(2000n);
+    const legacy = await legacyTxn(userId, accountId, 5000);
+    const put = await webWrite("PUT", legacy.id, cookie, csrfToken, { amountMinor: 3000 });
+    expect(put.status).toBe(200);
+    expect(await balance(accountId)).toBe(2000n); // untouched
+    expect((await prisma.transaction.findUnique({ where: { id: legacy.id } })).balanceApplied).toBe(false);
+  });
+
+  it("editing a new balance-applied transaction reverses and reapplies", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const { userId, accountId, cookie, csrfToken } = await webUserWithAccount(2000n);
+    const txn = await createTransaction(userId, { accountId, direction: "INCOME", status: "COMPLETED", amountMinor: 5000, bookedAt: new Date(), description: "New" });
+    expect(await balance(accountId)).toBe(7000n);
+    const put = await webWrite("PUT", txn.id, cookie, csrfToken, { amountMinor: 3000 });
+    expect(put.status).toBe(200);
+    expect(await balance(accountId)).toBe(5000n); // 2000 + 3000
+  });
+
+  it("deleting a new balance-applied transaction reverses exactly once", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const { userId, accountId, cookie, csrfToken } = await webUserWithAccount(2000n);
+    const txn = await createTransaction(userId, { accountId, direction: "INCOME", status: "COMPLETED", amountMinor: 5000, bookedAt: new Date(), description: "New" });
+    expect(await balance(accountId)).toBe(7000n);
+    const del = await webWrite("DELETE", txn.id, cookie, csrfToken);
+    expect(del.status).toBe(200);
+    expect(await balance(accountId)).toBe(2000n); // reversed once
   });
 });

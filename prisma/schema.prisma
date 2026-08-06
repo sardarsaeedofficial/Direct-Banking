@@ -233,6 +233,11 @@ model Transaction {
   currency    String       @default("GBP")
   bookedAt    DateTime
   description String
+
+  // True once this transaction's effect has been applied to BankAccount.balanceMinor.
+  // Legacy rows created before the balance-maintenance change stay false, so their
+  // balances are never reversed on edit/delete.
+  balanceApplied Boolean @default(false)
   notes       String?
   tags        String[]     @default([])
 

@@ -93,6 +93,8 @@ export async function createTransaction(userId: string, input: CreateTxnInput) {
     expectedPaymentId: expectedPaymentId ?? undefined,
     importBatchId: input.importBatchId ?? undefined,
     dedupeHash: hash,
+    // Newly-created transactions always maintain the balance (unless cancelled).
+    balanceApplied: (input.status ?? "COMPLETED") !== "CANCELLED",
   };
 
   // Single source of truth: BankAccount.balanceMinor is the current balance and
@@ -114,14 +116,16 @@ export async function createTransaction(userId: string, input: CreateTxnInput) {
 }
 
 /**
- * Reverse a transaction's balance effect (used when a transaction is deleted) so
- * the ledger stays consistent. CANCELLED rows had no effect and are skipped.
+ * Reverse a transaction's balance effect (used when a transaction is edited or
+ * deleted). Only rows whose effect was actually applied (balanceApplied = true)
+ * are reversed, so legacy transactions created before balance maintenance never
+ * change account balances.
  */
 export async function reverseTransactionBalance(
   tx: Prisma.TransactionClient,
-  txn: { accountId: string; direction: string; status: string; amountMinor: bigint; transferAccountId: string | null },
+  txn: { accountId: string; direction: string; amountMinor: bigint; transferAccountId: string | null; balanceApplied: boolean },
 ) {
-  if (txn.status === "CANCELLED") return;
+  if (!txn.balanceApplied) return;
   const delta = txn.direction === "INCOME" ? txn.amountMinor : -txn.amountMinor;
   await tx.bankAccount.update({ where: { id: txn.accountId }, data: { balanceMinor: { increment: -delta } } });
   if (txn.transferAccountId) {

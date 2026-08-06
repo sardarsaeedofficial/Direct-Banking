@@ -87,10 +87,10 @@ transactionsRouter.put(
     const existing = await prisma.transaction.findFirst({ where: { id: req.params.id, userId: req.auth!.userId } });
     if (!existing) throw new HttpError(404, "Transaction not found");
     const data = res.locals.body as Record<string, unknown>;
-    // Reverse the old balance effect and apply the new one atomically so amount/
-    // direction/status edits keep BankAccount.balanceMinor consistent.
+    // Only maintain the balance for transactions whose effect was already applied.
+    // Legacy rows (balanceApplied = false) are edited without touching balances.
     const txn = await prisma.$transaction(async (tx) => {
-      await reverseTransactionBalance(tx, existing);
+      if (existing.balanceApplied) await reverseTransactionBalance(tx, existing);
       const updated = await tx.transaction.update({
         where: { id: existing.id },
         data: {
@@ -102,14 +102,22 @@ transactionsRouter.put(
           categoryId: (data.categoryId as string | null | undefined) ?? undefined,
           amountMinor: data.amountMinor !== undefined ? BigInt(data.amountMinor as number) : undefined,
           bookedAt: data.bookedAt ? new Date(data.bookedAt as string) : undefined,
+          // Keep the flag consistent for balance-applied rows; legacy rows stay false.
+          balanceApplied: existing.balanceApplied ? undefined : false,
         },
       });
-      // Apply the new effect.
-      if (updated.status !== "CANCELLED") {
-        const delta = updated.direction === "INCOME" ? updated.amountMinor : -updated.amountMinor;
-        await tx.bankAccount.update({ where: { id: updated.accountId }, data: { balanceMinor: { increment: delta } } });
-        if (updated.transferAccountId) {
-          await tx.bankAccount.update({ where: { id: updated.transferAccountId }, data: { balanceMinor: { increment: -delta } } });
+      // Reapply the (possibly edited) effect only for balance-applied rows.
+      if (existing.balanceApplied) {
+        const applied = updated.status !== "CANCELLED";
+        if (applied) {
+          const delta = updated.direction === "INCOME" ? updated.amountMinor : -updated.amountMinor;
+          await tx.bankAccount.update({ where: { id: updated.accountId }, data: { balanceMinor: { increment: delta } } });
+          if (updated.transferAccountId) {
+            await tx.bankAccount.update({ where: { id: updated.transferAccountId }, data: { balanceMinor: { increment: -delta } } });
+          }
+        }
+        if (updated.balanceApplied !== applied) {
+          await tx.transaction.update({ where: { id: updated.id }, data: { balanceApplied: applied } });
         }
       }
       return updated;

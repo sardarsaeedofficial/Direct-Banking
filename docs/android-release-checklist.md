@@ -4,16 +4,33 @@
 
 The app depends on the mobile API and the mobile-auth tables.
 
-1. Apply the Prisma migration **`20260804220338_mobile_auth_and_imports`** in
-   production (additive: `MobileDevice`, `MobileRefreshToken`, extra
-   `NotificationImport` columns). Review it, then:
+1. Apply the Prisma migrations in production. Both are **additive** (no data
+   reset, no destructive change). Review, then:
    ```bash
    pnpm exec prisma migrate deploy
    ```
+   - `20260804220338_mobile_auth_and_imports` — `MobileDevice`,
+     `MobileRefreshToken`, extra `NotificationImport` columns.
+   - `20260806122300_transaction_balance_applied` — adds
+     `Transaction.balanceApplied` (`BOOLEAN NOT NULL DEFAULT false`). Existing
+     rows stay `false`.
 2. Set backend environment variables:
    - `MOBILE_JWT_SECRET` — **required in production**, ≥16 chars, secret & unique.
    - `MOBILE_ACCESS_TTL_MIN` (default 15) · `MOBILE_REFRESH_TTL_DAYS` (default 30).
 3. Redeploy the Direct Banking backend so `/api/mobile/v1/*` is live.
+
+### Account balances after deployment (important)
+
+`BankAccount.balanceMinor` is the current-balance source of truth and is now
+maintained automatically: new transactions adjust it atomically, and edits/deletes
+reverse it — but **only for transactions created after this change**
+(`balanceApplied = true`). Historical transactions created before it keep
+`balanceApplied = false` and never move the balance when edited or deleted.
+
+Balances are **not** recalculated automatically from history. After deploying,
+each user should **manually set each account to its correct real-world current
+balance** (Accounts → edit balance) once, if they had transactions before the
+upgrade. From then on the balance stays consistent on its own.
 
 ## Signing (keys never committed)
 
