@@ -22,3 +22,8 @@
 
 # Keep the notification listener service name (bound by the system).
 -keep class uk.co.prisom.directbanking.notifications.BankNotificationListenerService { *; }
+
+# Tink (via androidx.security.crypto / EncryptedSharedPreferences) references
+# compile-only annotations that are not on the runtime classpath.
+-dontwarn com.google.errorprone.annotations.**
+-dontwarn javax.annotation.**
