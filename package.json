@@ -20,7 +20,7 @@
     "copy:web": "tsx scripts/copy-web.ts",
     "start": "node packages/server/dist/index.js",
     "dev": "pnpm run prisma:generate && concurrently -k -n api,web -c blue,magenta \"pnpm -C packages/server run dev\" \"pnpm -C packages/web run dev\"",
-    "typecheck": "pnpm -r run typecheck",
+    "typecheck": "pnpm --filter @direct-banking/shared build && pnpm -r run typecheck",
     "test": "pnpm -r run test",
     "lint": "pnpm -r run lint"
   },

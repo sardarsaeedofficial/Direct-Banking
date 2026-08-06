@@ -44,6 +44,11 @@ jobs:
       - name: Generate Prisma client
         run: pnpm exec prisma generate
 
+      - name: Build shared package
+        # @direct-banking/shared exposes its types from dist; server typecheck
+        # imports it, so it must be built before the recursive type-check.
+        run: pnpm --filter @direct-banking/shared build
+
       - name: Type check
         run: pnpm -r typecheck
 
