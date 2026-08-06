@@ -8,12 +8,13 @@ import uk.co.prisom.directbanking.sync.SyncScheduler
 
 /**
  * Background handler for captured notifications: resolves the source app label,
- * runs the import pipeline, and kicks a sync when something was queued. Runs off
- * the listener callback thread (invoked from a coroutine).
+ * runs the import pipeline, kicks a sync when something was queued, and posts a
+ * "needs review" notification. Runs off the listener callback thread.
  */
 class CaptureCoordinator(
     context: Context,
     private val importRepository: ImportRepository,
+    private val notifier: AppNotifier,
 ) : NotificationCaptureSink {
 
     private val appContext = context.applicationContext
@@ -21,7 +22,12 @@ class CaptureCoordinator(
     override suspend fun onCaptured(raw: RawNotification) {
         val label = resolveLabel(raw.packageName)
         when (val result = importRepository.capture(raw, label)) {
-            is CaptureResult.Stored -> if (result.autoQueued) SyncScheduler.syncNow(appContext)
+            is CaptureResult.Stored -> {
+                if (result.autoQueued) SyncScheduler.syncNow(appContext)
+                if (result.reviewState != "UNRECOGNISED") {
+                    notifier.postReview(result.amountMinor, result.currency, result.merchant)
+                }
+            }
             CaptureResult.Ignored, CaptureResult.SourceNotApproved, CaptureResult.Unparsed -> Unit
         }
     }

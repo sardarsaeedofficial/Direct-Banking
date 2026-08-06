@@ -58,6 +58,7 @@ data class ApprovedSourceEntity(
     @PrimaryKey val packageName: String,
     val label: String,
     val approved: Boolean = false,
+    val ignored: Boolean = false, // user chose to permanently ignore this source
     val firstObservedMillis: Long,
     val lastSeenMillis: Long,
 )

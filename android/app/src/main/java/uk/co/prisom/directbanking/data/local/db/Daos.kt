@@ -65,6 +65,17 @@ interface SyncDao {
     suspend fun deletePendingCreate(fingerprint: String)
 }
 
+/** Source row plus a live count of transactions imported from it. */
+data class SourceWithCount(
+    val packageName: String,
+    val label: String,
+    val approved: Boolean,
+    val ignored: Boolean,
+    val firstObservedMillis: Long,
+    val lastSeenMillis: Long,
+    val importedCount: Int,
+)
+
 @Dao
 interface SourceDao {
     @Upsert
@@ -72,6 +83,13 @@ interface SourceDao {
 
     @Query("SELECT * FROM approved_source ORDER BY approved DESC, label ASC")
     fun observeAll(): Flow<List<ApprovedSourceEntity>>
+
+    @Query(
+        "SELECT s.packageName, s.label, s.approved, s.ignored, s.firstObservedMillis, s.lastSeenMillis, " +
+            "(SELECT COUNT(*) FROM parsed_import p WHERE p.sourcePackage = s.packageName AND p.localStatus = 'APPROVED') AS importedCount " +
+            "FROM approved_source s ORDER BY s.approved DESC, s.label ASC",
+    )
+    fun observeWithCounts(): Flow<List<SourceWithCount>>
 
     @Query("SELECT * FROM approved_source WHERE packageName = :pkg")
     suspend fun get(pkg: String): ApprovedSourceEntity?
@@ -81,6 +99,9 @@ interface SourceDao {
 
     @Query("UPDATE approved_source SET approved = :approved WHERE packageName = :pkg")
     suspend fun setApproved(pkg: String, approved: Boolean)
+
+    @Query("UPDATE approved_source SET ignored = :ignored, approved = 0 WHERE packageName = :pkg")
+    suspend fun setIgnored(pkg: String, ignored: Boolean)
 
     @Query("UPDATE approved_source SET lastSeenMillis = :now WHERE packageName = :pkg")
     suspend fun touch(pkg: String, now: Long)

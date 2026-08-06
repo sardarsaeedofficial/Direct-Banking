@@ -18,6 +18,14 @@ data class LoginRequest(
     val device: DeviceInfoDto,
 )
 
+@Serializable
+data class RegisterRequest(
+    val email: String,
+    val password: String,
+    val displayName: String? = null,
+    val device: DeviceInfoDto,
+)
+
 @Serializable data class RefreshRequest(val refreshToken: String)
 @Serializable data class LogoutRequest(val allDevices: Boolean = false)
 

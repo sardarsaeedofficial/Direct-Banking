@@ -5,16 +5,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import uk.co.prisom.directbanking.ui.LocalContainer
+import uk.co.prisom.directbanking.ui.navigation.AppRoot
 import uk.co.prisom.directbanking.ui.theme.DirectBankingTheme
 
 class MainActivity : ComponentActivity() {
@@ -22,21 +19,15 @@ class MainActivity : ComponentActivity() {
         installSplashScreen()
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        val container = (application as DirectBankingApp).container
         setContent {
             DirectBankingTheme {
-                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    Placeholder()
+                CompositionLocalProvider(LocalContainer provides container) {
+                    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                        AppRoot()
+                    }
                 }
             }
         }
     }
-}
-
-@Composable
-private fun Placeholder() {
-    Text(
-        text = "Direct Banking",
-        style = MaterialTheme.typography.headlineMedium,
-        modifier = Modifier.fillMaxSize().wrapContentSize(Alignment.Center).padding(24.dp),
-    )
 }

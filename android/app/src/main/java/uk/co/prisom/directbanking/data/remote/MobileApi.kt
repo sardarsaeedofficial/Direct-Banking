@@ -19,11 +19,15 @@ import uk.co.prisom.directbanking.data.remote.dto.NotifImportPatchRequest
 import uk.co.prisom.directbanking.data.remote.dto.NotifImportPatchResponse
 import uk.co.prisom.directbanking.data.remote.dto.NotifImportRequest
 import uk.co.prisom.directbanking.data.remote.dto.RefreshRequest
+import uk.co.prisom.directbanking.data.remote.dto.RegisterRequest
 import uk.co.prisom.directbanking.data.remote.dto.TokenResponse
 import uk.co.prisom.directbanking.data.remote.dto.TransactionListResponse
 
 /** Retrofit binding for the Direct Banking mobile API (/api/mobile/v1). */
 interface MobileApi {
+    @POST("api/mobile/v1/auth/register")
+    suspend fun register(@Body body: RegisterRequest): LoginResponse
+
     @POST("api/mobile/v1/auth/login")
     suspend fun login(@Body body: LoginRequest): LoginResponse
 

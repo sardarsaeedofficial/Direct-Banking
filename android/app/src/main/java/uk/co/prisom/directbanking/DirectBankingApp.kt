@@ -21,7 +21,7 @@ class DirectBankingApp : Application() {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
-        BankNotificationListenerService.sink = CaptureCoordinator(this, container.importRepository)
+        BankNotificationListenerService.sink = CaptureCoordinator(this, container.importRepository, container.notifier)
         SyncScheduler.ensurePeriodic(this)
         createChannels()
     }

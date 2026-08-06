@@ -23,7 +23,13 @@ sealed interface CaptureResult {
     data object Ignored : CaptureResult
     data object SourceNotApproved : CaptureResult
     data object Unparsed : CaptureResult
-    data class Stored(val reviewState: String, val autoQueued: Boolean) : CaptureResult
+    data class Stored(
+        val reviewState: String,
+        val autoQueued: Boolean,
+        val amountMinor: Long,
+        val currency: String,
+        val merchant: String?,
+    ) : CaptureResult
 }
 
 /**
@@ -47,6 +53,9 @@ class ImportRepository(
     suspend fun capture(raw: RawNotification, appLabel: String): CaptureResult {
         val input = NotificationInput(raw.packageName, raw.postTime, raw.title, raw.text, raw.bigText, raw.textLines, raw.subText)
         if (!SourceFilter.passesBaseline(raw.packageName, input.combinedText)) return CaptureResult.Ignored
+
+        // Permanently-ignored sources are dropped without recording anything more.
+        if (sourceDao.get(raw.packageName)?.ignored == true) return CaptureResult.Ignored
 
         // Record the source (label only — no notification text) so the user can approve it.
         recordObserved(raw.packageName, appLabel)
@@ -81,7 +90,7 @@ class ImportRepository(
 
         val autoQueued = candidate.confidence >= 0.60 && existing?.remoteId == null
         if (autoQueued) enqueueCreate(entity)
-        return CaptureResult.Stored(reviewState, autoQueued)
+        return CaptureResult.Stored(reviewState, autoQueued, candidate.amountMinor, candidate.currency, candidate.merchant)
     }
 
     suspend fun approve(
@@ -122,7 +131,8 @@ class ImportRepository(
         }
     }
 
-    suspend fun markSourceIgnored(packageName: String) = sourceDao.setApproved(packageName, false)
+    /** Permanently ignore a source: it will never be parsed or suggested again. */
+    suspend fun markSourceIgnored(packageName: String) = sourceDao.setIgnored(packageName, true)
 
     private suspend fun recordObserved(packageName: String, label: String) {
         val now = clock()

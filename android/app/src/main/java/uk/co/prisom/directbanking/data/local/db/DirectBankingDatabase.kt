@@ -12,7 +12,7 @@ import androidx.room.RoomDatabase
         PendingSyncOpEntity::class,
         ApprovedSourceEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = false,
 )
 abstract class DirectBankingDatabase : RoomDatabase() {

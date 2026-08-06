@@ -2,6 +2,7 @@ import { Router } from "express";
 import { NotifStatus } from "@prisma/client";
 import {
   mobileLoginSchema,
+  mobileRegisterSchema,
   mobileRefreshSchema,
   mobileLogoutSchema,
   notifImportCreateSchema,
@@ -18,6 +19,7 @@ import { asyncHandler, HttpError } from "../middleware/error.js";
 import { authLimiter } from "../middleware/rateLimit.js";
 import { createTransaction } from "../services/transactions.service.js";
 import { getDashboard } from "../services/dashboard.service.js";
+import { registerUser } from "../services/users.service.js";
 
 export const mobileRouter = Router();
 
@@ -33,6 +35,23 @@ function reviewStateFor(confidence: number): "DRAFT" | "REVIEW_REQUIRED" | "UNRE
 }
 
 // ── Auth ────────────────────────────────────────────────────────────────────
+
+mobileRouter.post(
+  "/auth/register",
+  authLimiter,
+  validate(mobileRegisterSchema),
+  asyncHandler(async (req, res) => {
+    const { email, password, displayName, device } = validated<typeof mobileRegisterSchema>(res);
+    const user = await registerUser({ email, password, displayName });
+    const tokens = await issueTokensForDevice(user.id, device);
+    res.status(201).json({
+      user: publicUser(user),
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresIn: tokens.expiresIn,
+    });
+  }),
+);
 
 mobileRouter.post(
   "/auth/login",

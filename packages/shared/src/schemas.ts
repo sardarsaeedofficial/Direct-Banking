@@ -205,6 +205,14 @@ export const mobileLoginSchema = z.object({
 });
 export type MobileLoginInput = z.infer<typeof mobileLoginSchema>;
 
+export const mobileRegisterSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(10, "Use at least 10 characters").max(200),
+  displayName: z.string().min(1).max(120).optional(),
+  device: deviceInfoSchema,
+});
+export type MobileRegisterInput = z.infer<typeof mobileRegisterSchema>;
+
 export const mobileRefreshSchema = z.object({ refreshToken: z.string().min(20).max(400) });
 
 export const mobileLogoutSchema = z.object({

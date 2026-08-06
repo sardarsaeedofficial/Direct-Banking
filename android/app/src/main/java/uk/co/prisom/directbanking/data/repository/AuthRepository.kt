@@ -7,6 +7,7 @@ import uk.co.prisom.directbanking.data.remote.dto.BootstrapResponse
 import uk.co.prisom.directbanking.data.remote.dto.DeviceInfoDto
 import uk.co.prisom.directbanking.data.remote.dto.LoginRequest
 import uk.co.prisom.directbanking.data.remote.dto.LogoutRequest
+import uk.co.prisom.directbanking.data.remote.dto.RegisterRequest
 import uk.co.prisom.directbanking.data.remote.dto.UserDto
 
 /** Owns the mobile session: login, token refresh, logout, profile/bootstrap. */
@@ -17,6 +18,21 @@ class AuthRepository(
 ) {
     fun isLoggedIn(): Boolean = tokenStore.isLoggedIn()
     fun cachedUserId(): String? = tokenStore.userId()
+
+    suspend fun register(email: String, password: String, displayName: String?): Result<UserDto> = runCatching {
+        val res = clients.publicApi.register(
+            RegisterRequest(
+                email = email.trim(),
+                password = password,
+                displayName = displayName?.ifBlank { null },
+                device = DeviceInfoDto(deviceId = tokenStore.deviceId, model = Build.MODEL, appVersion = appVersion),
+            ),
+        )
+        tokenStore.saveTokens(res.accessToken, res.refreshToken, res.expiresIn)
+        val user = res.user ?: clients.authApi.me().user
+        tokenStore.saveUser(user.id)
+        user
+    }
 
     suspend fun login(email: String, password: String, totp: String?): Result<UserDto> = runCatching {
         val res = clients.publicApi.login(
