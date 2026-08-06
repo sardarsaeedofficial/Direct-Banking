@@ -1,0 +1,177 @@
+package uk.co.prisom.directbanking.ui.navigation
+
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.RateReview
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import uk.co.prisom.directbanking.debug.DebugHooks
+import uk.co.prisom.directbanking.debug.addDebugDestinations
+import uk.co.prisom.directbanking.ui.LocalContainer
+import uk.co.prisom.directbanking.ui.containerViewModel
+import uk.co.prisom.directbanking.ui.screens.AccountsScreen
+import uk.co.prisom.directbanking.ui.screens.ApprovedSourcesScreen
+import uk.co.prisom.directbanking.ui.screens.CreateAccountScreen
+import uk.co.prisom.directbanking.ui.screens.DashboardScreen
+import uk.co.prisom.directbanking.ui.screens.DirectDebitsScreen
+import uk.co.prisom.directbanking.ui.screens.DisclosureScreen
+import uk.co.prisom.directbanking.ui.screens.NotificationAccessScreen
+import uk.co.prisom.directbanking.ui.screens.NotificationsScreen
+import uk.co.prisom.directbanking.ui.screens.ReviewImportsScreen
+import uk.co.prisom.directbanking.ui.screens.SettingsScreen
+import uk.co.prisom.directbanking.ui.screens.SignInScreen
+import uk.co.prisom.directbanking.ui.screens.SplashScreen
+import uk.co.prisom.directbanking.ui.screens.SyncStatusScreen
+import uk.co.prisom.directbanking.ui.screens.TransactionsScreen
+import uk.co.prisom.directbanking.ui.session.SessionState
+import uk.co.prisom.directbanking.ui.session.SessionViewModel
+import uk.co.prisom.directbanking.ui.vm.DashboardViewModel
+import uk.co.prisom.directbanking.ui.vm.OverviewViewModel
+import uk.co.prisom.directbanking.ui.vm.ReviewViewModel
+import uk.co.prisom.directbanking.ui.vm.SettingsViewModel
+import uk.co.prisom.directbanking.ui.vm.SourcesViewModel
+import uk.co.prisom.directbanking.ui.vm.SyncViewModel
+import uk.co.prisom.directbanking.ui.vm.TransactionsViewModel
+
+private object Routes {
+    const val DASHBOARD = "dashboard"
+    const val TRANSACTIONS = "transactions"
+    const val REVIEW = "review"
+    const val SOURCES = "sources"
+    const val SETTINGS = "settings"
+    const val ACCOUNTS = "accounts"
+    const val DIRECT_DEBITS = "directdebits"
+    const val NOTIFICATIONS = "notifications"
+    const val SYNC = "sync"
+    const val ACCESS = "notificationaccess"
+    const val SIGN_IN = "signin"
+    const val CREATE = "create"
+}
+
+private data class Tab(val route: String, val label: String, val icon: ImageVector)
+
+private val tabs = listOf(
+    Tab(Routes.DASHBOARD, "Home", Icons.Filled.Home),
+    Tab(Routes.TRANSACTIONS, "Activity", Icons.AutoMirrored.Filled.List),
+    Tab(Routes.REVIEW, "Review", Icons.Filled.RateReview),
+    Tab(Routes.SOURCES, "Sources", Icons.Filled.Apps),
+    Tab(Routes.SETTINGS, "Settings", Icons.Filled.Settings),
+)
+
+@Composable
+fun AppRoot() {
+    val session: SessionViewModel = containerViewModel { SessionViewModel(it.authRepository) }
+    val state by session.state.collectAsStateWithLifecycle()
+    when (state) {
+        is SessionState.Loading -> SplashScreen()
+        is SessionState.SignedOut -> AuthNav(session)
+        is SessionState.SignedIn -> MainNav(session)
+    }
+}
+
+@Composable
+private fun AuthNav(session: SessionViewModel) {
+    val nav = rememberNavController()
+    NavHost(nav, startDestination = Routes.SIGN_IN) {
+        composable(Routes.SIGN_IN) { SignInScreen(session, onCreateAccount = { nav.navigate(Routes.CREATE) }) }
+        composable(Routes.CREATE) { CreateAccountScreen(session, onSignIn = { nav.popBackStack() }) }
+    }
+}
+
+@Composable
+private fun MainNav(session: SessionViewModel) {
+    val nav = rememberNavController()
+    Scaffold(
+        bottomBar = {
+            val backStack by nav.currentBackStackEntryAsState()
+            val current = backStack?.destination?.route
+            NavigationBar {
+                tabs.forEach { tab ->
+                    NavigationBarItem(
+                        selected = current == tab.route,
+                        onClick = {
+                            nav.navigate(tab.route) {
+                                popUpTo(Routes.DASHBOARD) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        },
+                        icon = { Icon(tab.icon, contentDescription = tab.label) },
+                        label = { Text(tab.label) },
+                    )
+                }
+            }
+        },
+    ) { padding ->
+        NavHost(nav, startDestination = Routes.DASHBOARD, modifier = Modifier.padding(padding)) {
+            composable(Routes.DASHBOARD) {
+                DashboardScreen(
+                    dashboard = containerViewModel { DashboardViewModel(it.dashboardRepository) },
+                    sync = containerViewModel { SyncViewModel(it.syncRepository, it.appPreferences, it.appContext) },
+                    onAccounts = { nav.navigate(Routes.ACCOUNTS) },
+                    onDirectDebits = { nav.navigate(Routes.DIRECT_DEBITS) },
+                    onSync = { nav.navigate(Routes.SYNC) },
+                    onNotifications = { nav.navigate(Routes.NOTIFICATIONS) },
+                )
+            }
+            composable(Routes.TRANSACTIONS) {
+                TransactionsScreen(containerViewModel { TransactionsViewModel(it.transactionRepository) })
+            }
+            composable(Routes.REVIEW) {
+                ReviewImportsScreen(containerViewModel { ReviewViewModel(it.importRepository, it.authRepository, it.appContext) })
+            }
+            composable(Routes.SOURCES) {
+                SourcesTab(
+                    vm = containerViewModel { SourcesViewModel(it.sourceRepository, it.appPreferences) },
+                    onAccess = { nav.navigate(Routes.ACCESS) },
+                    onDashboard = { nav.navigate(Routes.DASHBOARD) },
+                )
+            }
+            composable(Routes.SETTINGS) {
+                SettingsScreen(
+                    session = session,
+                    settings = containerViewModel { SettingsViewModel(it.authRepository, it.db) },
+                    onManageSources = { nav.navigate(Routes.SOURCES) },
+                    onNotificationAccess = { nav.navigate(Routes.ACCESS) },
+                    debugRoute = DebugHooks.simulatorRoute,
+                    onOpenDebug = { DebugHooks.simulatorRoute?.let { nav.navigate(it) } },
+                )
+            }
+            composable(Routes.ACCESS) { NotificationAccessScreen(onManageSources = { nav.navigate(Routes.SOURCES) }) }
+            composable(Routes.ACCOUNTS) { AccountsScreen(containerViewModel { OverviewViewModel(it.dashboardRepository) }) }
+            composable(Routes.DIRECT_DEBITS) { DirectDebitsScreen(containerViewModel { OverviewViewModel(it.dashboardRepository) }) }
+            composable(Routes.NOTIFICATIONS) { NotificationsScreen() }
+            composable(Routes.SYNC) {
+                SyncStatusScreen(containerViewModel { SyncViewModel(it.syncRepository, it.appPreferences, it.appContext) })
+            }
+            addDebugDestinations(nav)
+        }
+    }
+}
+
+@Composable
+private fun SourcesTab(vm: SourcesViewModel, onAccess: () -> Unit, onDashboard: () -> Unit) {
+    val accepted by vm.disclosureAccepted.collectAsStateWithLifecycle()
+    // Never parse before consent: the disclosure gates the whole source flow.
+    if (!accepted) {
+        DisclosureScreen(vm, onAgree = onAccess, onDecline = onDashboard)
+    } else {
+        ApprovedSourcesScreen(vm)
+    }
+}

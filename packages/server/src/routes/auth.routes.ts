@@ -9,21 +9,9 @@ import { validate, validated } from "../middleware/validate.js";
 import { asyncHandler, HttpError } from "../middleware/error.js";
 import { authLimiter } from "../middleware/rateLimit.js";
 import { audit } from "../services/audit.service.js";
+import { registerUser } from "../services/users.service.js";
 
 export const authRouter = Router();
-
-const DEFAULT_CATEGORIES = [
-  { name: "Housing", colour: "#6366f1" },
-  { name: "Utilities", colour: "#0ea5e9" },
-  { name: "Groceries", colour: "#22c55e" },
-  { name: "Transport", colour: "#f59e0b" },
-  { name: "Subscriptions", colour: "#a855f7" },
-  { name: "Insurance", colour: "#14b8a6" },
-  { name: "Eating out", colour: "#ef4444" },
-  { name: "Income", colour: "#10b981" },
-  { name: "Savings", colour: "#3b82f6" },
-  { name: "Other", colour: "#64748b" },
-];
 
 authRouter.post(
   "/register",
@@ -31,17 +19,7 @@ authRouter.post(
   validate(registerSchema),
   asyncHandler(async (req, res) => {
     const { email, password, displayName } = validated<typeof registerSchema>(res);
-    const existing = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
-    if (existing) throw new HttpError(409, "An account with that email already exists");
-
-    const user = await prisma.user.create({
-      data: {
-        email: email.toLowerCase(),
-        passwordHash: await hashPassword(password),
-        displayName,
-        categories: { create: DEFAULT_CATEGORIES },
-      },
-    });
+    const user = await registerUser({ email, password, displayName });
     const { csrfToken } = await createSession(res, user.id, { ip: req.ip, userAgent: req.get("user-agent") ?? undefined });
     await audit(req, "auth.register", { entityType: "User", entityId: user.id });
     res.status(201).json({ user: { id: user.id, email: user.email, displayName: user.displayName }, csrfToken });

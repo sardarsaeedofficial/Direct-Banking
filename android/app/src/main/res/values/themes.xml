@@ -1,0 +1,14 @@
+<resources>
+    <!-- Base app theme. Compose drives the real UI; this is the window backdrop. -->
+    <style name="Theme.DirectBanking" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@color/brand_primary</item>
+        <item name="android:windowBackground">@color/white</item>
+    </style>
+
+    <!-- Launch theme (androidx core-splashscreen). -->
+    <style name="Theme.DirectBanking.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/brand_primary</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="postSplashScreenTheme">@style/Theme.DirectBanking</item>
+    </style>
+</resources>

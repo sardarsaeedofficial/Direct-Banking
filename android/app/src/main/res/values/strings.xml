@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">Direct Banking</string>
+    <string name="notification_access_service_name">Direct Banking notification import</string>
+
+    <!-- Disclosure shown BEFORE opening notification-access settings. -->
+    <string name="disclosure_title">Import transactions from notifications</string>
+    <string name="disclosure_body">Direct Banking can read transaction notifications from financial apps you choose, even when Direct Banking is not open. It uses the amount, merchant, transaction type and account hint to create draft transactions.\n\nNotifications from apps you have not selected are ignored. Direct Banking does not move money, read bank passwords or sell notification information. Normalised transaction information is securely synchronised to your Direct Banking account.</string>
+    <string name="disclosure_agree">Agree and continue</string>
+    <string name="disclosure_decline">Not now</string>
+    <string name="privacy_policy">Privacy policy</string>
+</resources>

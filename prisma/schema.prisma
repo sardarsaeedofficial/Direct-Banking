@@ -139,6 +139,8 @@ model User {
   attachments   Attachment[]
   auditLogs     AuditLog[]
   settings      AppSetting[]
+  mobileDevices MobileDevice[]
+  mobileTokens  MobileRefreshToken[]
 }
 
 model Session {
@@ -380,8 +382,55 @@ model NotificationImport {
   status            NotifStatus @default(PENDING)
   createdAt         DateTime    @default(now())
 
+  // ---- Mobile (Android notification import) fields ----
+  // The duplicate fingerprint from the device is stored in sourceHash and kept
+  // unique per user so a reposted/updated notification never duplicates.
+  deviceId              String?
+  direction             TxnDirection?     // parsed candidate direction
+  currency              String            @default("GBP")
+  reviewState           String            @default("DRAFT") // DRAFT | REVIEW_REQUIRED | UNRECOGNISED
+  redactedText          String?           // redacted source text (never full notification text)
+  approvedTransactionId String?
+
   @@unique([userId, sourceHash])
   @@index([userId, status])
+  @@index([userId, reviewState])
+}
+
+// ---------- Mobile authentication (native Android client) ----------
+model MobileDevice {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceId   String   // client-generated stable device identifier
+  platform   String   @default("android")
+  model      String?
+  appVersion String?
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  revokedAt  DateTime?
+
+  refreshTokens MobileRefreshToken[]
+
+  @@unique([userId, deviceId])
+  @@index([userId])
+}
+
+model MobileRefreshToken {
+  id           String       @id @default(cuid())
+  userId       String
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceId     String
+  device       MobileDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  tokenHash    String       @unique // sha256 of the opaque refresh token — never the token itself
+  expiresAt    DateTime
+  createdAt    DateTime     @default(now())
+  rotatedAt    DateTime? // set when this token was used to mint its successor
+  revokedAt    DateTime?
+  replacedById String? // successor in the rotation chain (for reuse detection)
+
+  @@index([userId])
+  @@index([deviceId])
 }
 
 model Reminder {

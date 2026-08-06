@@ -188,3 +188,68 @@ export const settingSchema = z.object({
   key: z.string().min(1).max(80),
   value: z.unknown(),
 });
+
+// Mobile (native Android client) ---------------------------------------------
+export const deviceInfoSchema = z.object({
+  deviceId: z.string().min(8).max(128),
+  model: z.string().max(120).optional(),
+  appVersion: z.string().max(40).optional(),
+  platform: z.enum(["android", "ios"]).default("android"),
+});
+
+export const mobileLoginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1).max(200),
+  totp: z.string().regex(/^\d{6}$/).optional(),
+  device: deviceInfoSchema,
+});
+export type MobileLoginInput = z.infer<typeof mobileLoginSchema>;
+
+export const mobileRegisterSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(10, "Use at least 10 characters").max(200),
+  displayName: z.string().min(1).max(120).optional(),
+  device: deviceInfoSchema,
+});
+export type MobileRegisterInput = z.infer<typeof mobileRegisterSchema>;
+
+export const mobileRefreshSchema = z.object({ refreshToken: z.string().min(20).max(400) });
+
+export const mobileLogoutSchema = z.object({
+  refreshToken: z.string().min(20).max(400).optional(),
+  allDevices: z.boolean().default(false),
+});
+
+// A parsed transaction candidate captured from a device notification.
+export const notifImportCreateSchema = z.object({
+  fingerprint: z.string().min(8).max(200), // stable duplicate fingerprint (stored as sourceHash)
+  sourcePackage: z.string().min(1).max(160),
+  direction: z.enum(TXN_DIRECTIONS),
+  amountMinor: minorAmount.nonnegative(),
+  currency: currency,
+  merchant: z.string().max(160).optional().nullable(),
+  accountHint: z.string().max(80).optional().nullable(),
+  occurredAt: isoDate,
+  confidence: z.number().min(0).max(1),
+  redactedSourceText: z.string().max(2000).default(""),
+  title: z.string().max(240).default(""),
+});
+export type NotifImportCreateInput = z.infer<typeof notifImportCreateSchema>;
+
+// Review action for a queued import.
+export const notifImportPatchSchema = z.object({
+  action: z.enum(["approve", "reject", "edit"]).default("edit"),
+  amountMinor: minorAmount.positive().optional(),
+  direction: z.enum(TXN_DIRECTIONS).optional(),
+  merchant: z.string().max(160).optional().nullable(),
+  occurredAt: isoDate.optional(),
+  accountId: cuid.optional(),
+  categoryId: cuid.optional().nullable(),
+  notes: z.string().max(2000).optional(),
+});
+export type NotifImportPatchInput = z.infer<typeof notifImportPatchSchema>;
+
+export const notifImportQuerySchema = z.object({
+  status: z.enum(NOTIF_STATUSES).optional(),
+  reviewState: z.enum(["DRAFT", "REVIEW_REQUIRED", "UNRECOGNISED"]).optional(),
+});

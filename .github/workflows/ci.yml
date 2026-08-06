@@ -22,13 +22,18 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup pnpm
+        # Version comes from the packageManager field (pnpm@11.3.0). Do not also
+        # pass a `version:` input here — action-setup errors on multiple sources.
         uses: pnpm/action-setup@v4
+        with:
+          run_install: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: pnpm
+          # pnpm 11 requires Node >= 22.13; Node 20 fails (and lacks node:sqlite).
+          node-version: "22.13.1"
+          cache: "pnpm"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -38,6 +43,11 @@ jobs:
 
       - name: Generate Prisma client
         run: pnpm exec prisma generate
+
+      - name: Build shared package
+        # @direct-banking/shared exposes its types from dist; server typecheck
+        # imports it, so it must be built before the recursive type-check.
+        run: pnpm --filter @direct-banking/shared build
 
       - name: Type check
         run: pnpm -r typecheck

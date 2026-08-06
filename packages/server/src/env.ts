@@ -20,6 +20,14 @@ const schema = z.object({
     .default("false")
     .transform((v) => v === "true"),
   SCHEDULER_INTERVAL_SECONDS: z.coerce.number().int().positive().default(60),
+  // Mobile (native Android) auth. Access tokens are short-lived JWTs; refresh
+  // tokens are opaque, rotated, and stored hashed. Use a dedicated secret.
+  MOBILE_JWT_SECRET: z
+    .string()
+    .min(16, "MOBILE_JWT_SECRET must be at least 16 characters")
+    .default("dev-insecure-mobile-secret-change-me"),
+  MOBILE_ACCESS_TTL_MIN: z.coerce.number().int().positive().default(15),
+  MOBILE_REFRESH_TTL_DAYS: z.coerce.number().int().positive().default(30),
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().int().optional(),
   SMTP_USER: z.string().optional(),
