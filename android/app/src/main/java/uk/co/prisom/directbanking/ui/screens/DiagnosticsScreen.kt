@@ -57,6 +57,18 @@ fun DiagnosticsScreen(vm: DiagnosticsViewModel) {
                 Row2("Title (redacted)", snap.lastRedactedTitle ?: "—")
                 Row2("Text (redacted)", snap.lastRedactedText ?: "—")
                 HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                Row2("Trust level", snap.trustLevel ?: "—")
+                Row2("Built-in trusted", if (snap.builtInTrusted) "yes" else "no")
+                Row2("Signature checked", if (snap.signatureChecked) "yes" else "no")
+                Row2(
+                    "Signature matched",
+                    when (snap.signatureMatched) {
+                        true -> "yes"
+                        false -> "no"
+                        null -> "not configured"
+                    },
+                )
+                Row2("Signing SHA-256", snap.signingSha256Abbrev ?: "—")
                 Row2("Source trusted/approved", if (snap.sourceTrustedOrApproved) "yes" else "no")
                 Row2("Auto-import enabled", if (snap.autoImportEnabled) "yes" else "no")
                 Row2("Linked account", snap.linkedAccountId ?: "not mapped")

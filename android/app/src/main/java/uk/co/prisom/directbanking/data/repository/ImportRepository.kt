@@ -3,6 +3,9 @@ package uk.co.prisom.directbanking.data.repository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import uk.co.prisom.directbanking.data.SignatureInspector
+import uk.co.prisom.directbanking.data.SourceTrust
+import uk.co.prisom.directbanking.data.SourceTrustLevel
 import uk.co.prisom.directbanking.data.TrustedSources
 import uk.co.prisom.directbanking.data.local.db.ApprovedSourceEntity
 import uk.co.prisom.directbanking.data.local.db.CapturedDao
@@ -42,6 +45,11 @@ data class CaptureOutcome(
     val confidence: Double? = null,
     val fingerprint: String? = null,
     val transactionId: String? = null,
+    val trustLevel: String? = null,
+    val builtInTrusted: Boolean = false,
+    val signatureChecked: Boolean = false,
+    val signatureMatched: Boolean? = null,
+    val signingSha256Abbrev: String? = null,
 )
 
 /** Result of the injected atomic auto-import call. */
@@ -67,6 +75,8 @@ class ImportRepository(
     private val json: Json,
     private val autoImport: suspend (NotifAutoImportRequest) -> AutoImportResult = { AutoImportResult.Failed },
     private val disclosureAccepted: suspend () -> Boolean = { true },
+    private val resolveTrust: (packageName: String, userApproved: Boolean) -> SourceTrust =
+        { pkg, approved -> TrustedSources.resolveTrust(SignatureInspector.None, pkg, approved) },
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
     fun observeReviewQueue(): Flow<List<ParsedImportEntity>> = importDao.observeReviewQueue()
@@ -78,17 +88,29 @@ class ImportRepository(
 
         if (!SourceFilter.passesBaseline(raw.packageName, combined)) return rejected("denylisted")
         if (!disclosureAccepted()) return rejected("consent disabled")
-        if (sourceDao.get(raw.packageName)?.ignored == true) return rejected("source permanently ignored")
+        val existing = sourceDao.get(raw.packageName)
+        if (existing?.ignored == true) return rejected("source permanently ignored")
 
-        val src = ensureSource(raw.packageName, appLabel)
+        // Classify the source (built-in signature check / user approval) once per capture.
+        val trust = resolveTrust(raw.packageName, existing?.approved ?: false)
+        val src = ensureSource(existing, raw.packageName, appLabel, trust)
         val sourceName = src.label
+
+        // Stamps the trust classification onto any outcome produced past this point.
+        fun CaptureOutcome.tagged() = copy(
+            trustLevel = trust.level.name,
+            builtInTrusted = src.isBuiltInTrusted,
+            signatureChecked = trust.signatureChecked,
+            signatureMatched = trust.signatureMatched,
+            signingSha256Abbrev = trust.signingSha256Abbrev,
+        )
 
         if (!src.approved) {
             rememberLatest(raw, combined) // keep for reprocessing on approval
-            return CaptureOutcome(ImportOutcome.SETUP_REQUIRED, "source unapproved", sourceName, trustedOrApproved = false, autoImportEnabled = src.autoImportEnabled)
+            return CaptureOutcome(ImportOutcome.SETUP_REQUIRED, "source unapproved", sourceName, trustedOrApproved = false, autoImportEnabled = src.autoImportEnabled).tagged()
         }
-        if (combined.isBlank()) return rejected("empty text", sourceName)
-        if (TransactionClassifier.isNonTransaction(combined)) return rejected("non-transaction notification", sourceName)
+        if (combined.isBlank()) return rejected("empty text", sourceName).tagged()
+        if (TransactionClassifier.isNonTransaction(combined)) return rejected("non-transaction notification", sourceName).tagged()
 
         val candidate = parser.parse(input)
         if (candidate == null) {
@@ -104,12 +126,12 @@ class ImportRepository(
                     ),
                 )
             }
-            return CaptureOutcome(ImportOutcome.REVIEW_REQUIRED, "missing amount or direction", sourceName, trustedOrApproved = true, autoImportEnabled = src.autoImportEnabled, fingerprint = fp)
+            return CaptureOutcome(ImportOutcome.REVIEW_REQUIRED, "missing amount or direction", sourceName, trustedOrApproved = true, autoImportEnabled = src.autoImportEnabled, fingerprint = fp).tagged()
         }
 
         val fingerprint = Fingerprint.compute(userId(), tokenStore.deviceId, candidate.sourcePackage, candidate.amountMinor, candidate.direction, candidate.merchant, raw.postTime)
         if (importDao.byFingerprint(fingerprint) != null) {
-            return CaptureOutcome(ImportOutcome.DUPLICATE, "duplicate", sourceName, fingerprint = fingerprint)
+            return CaptureOutcome(ImportOutcome.DUPLICATE, "duplicate", sourceName, fingerprint = fingerprint).tagged()
         }
 
         val accountId = src.defaultAccountId
@@ -118,7 +140,7 @@ class ImportRepository(
             autoImportEnabled = src.autoImportEnabled, linkedAccountId = accountId, amountMinor = candidate.amountMinor,
             currency = candidate.currency, direction = candidate.direction.name, merchant = candidate.merchant,
             confidence = candidate.confidence, fingerprint = fingerprint,
-        )
+        ).tagged()
 
         // Trusted/auto source with no mapped account → SETUP_REQUIRED, remember for reprocessing.
         if (accountId == null && (src.isBuiltInTrusted || src.autoImportEnabled)) {
@@ -210,25 +232,32 @@ class ImportRepository(
 
     // ── source seeding / helpers ─────────────────────────────────────────────
 
-    private suspend fun ensureSource(packageName: String, label: String): ApprovedSourceEntity {
-        val existing = sourceDao.get(packageName)
+    private suspend fun ensureSource(
+        existing: ApprovedSourceEntity?,
+        packageName: String,
+        label: String,
+        trust: SourceTrust,
+    ): ApprovedSourceEntity {
         if (existing != null) {
             sourceDao.touch(packageName, clock())
             return existing
         }
-        val trusted = TrustedSources.isTrusted(packageName)
+        // Grant built-in trust only when the package is a known bank AND its signature
+        // was not rejected against configured pins. A spoof (built-in id, wrong cert →
+        // UNAPPROVED) is treated like any unknown source: it must be approved by hand.
+        val trustBuiltIn = trust.builtIn && trust.level != SourceTrustLevel.UNAPPROVED
         val now = clock()
         val row = ApprovedSourceEntity(
             packageName = packageName,
-            label = TrustedSources.displayName(packageName) ?: label,
-            approved = trusted,
+            label = if (trust.builtIn) TrustedSources.displayName(packageName) ?: label else label,
+            approved = trustBuiltIn,
             ignored = false,
             firstObservedMillis = now,
             lastSeenMillis = now,
-            autoImportEnabled = trusted,
+            autoImportEnabled = trustBuiltIn,
             requireReview = false,
             defaultAccountId = null,
-            isBuiltInTrusted = trusted,
+            isBuiltInTrusted = trustBuiltIn,
         )
         sourceDao.upsert(row)
         return row

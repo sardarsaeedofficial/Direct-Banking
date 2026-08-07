@@ -3,7 +3,9 @@ package uk.co.prisom.directbanking.di
 import android.content.Context
 import kotlinx.coroutines.flow.first
 import uk.co.prisom.directbanking.BuildConfig
+import uk.co.prisom.directbanking.data.AndroidSignatureInspector
 import uk.co.prisom.directbanking.data.DiagnosticsRepository
+import uk.co.prisom.directbanking.data.TrustedSources
 import uk.co.prisom.directbanking.data.local.AppPreferences
 import uk.co.prisom.directbanking.data.local.db.DirectBankingDatabase
 import uk.co.prisom.directbanking.data.local.security.SecureTokenStore
@@ -30,6 +32,7 @@ class AppContainer(context: Context) {
     private val json = ApiFactory.json
     private val apiClients = ApiFactory.create(BuildConfig.API_BASE_URL, tokenStore, BuildConfig.DEBUG)
     val db = DirectBankingDatabase.build(appContext)
+    private val signatureInspector = AndroidSignatureInspector(appContext)
 
     val authRepository = AuthRepository(apiClients, tokenStore, BuildConfig.VERSION_NAME)
     val dashboardRepository = DashboardRepository(authRepository)
@@ -47,6 +50,7 @@ class AppContainer(context: Context) {
             }
         },
         disclosureAccepted = { appPreferences.disclosureAccepted.first() },
+        resolveTrust = { pkg, approved -> TrustedSources.resolveTrust(signatureInspector, pkg, approved) },
     )
     val syncRepository = SyncRepository(
         apiClients.authApi, db.importDao(), db.syncDao(), json,

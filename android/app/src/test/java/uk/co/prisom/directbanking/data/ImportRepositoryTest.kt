@@ -88,7 +88,8 @@ class ImportRepositoryTest {
     private fun repo(
         source: FakeSourceDao, import: FakeImportDao, sync: FakeSyncDao, captured: FakeCapturedDao = FakeCapturedDao(),
         auto: suspend (NotifAutoImportRequest) -> AutoImportResult = { AutoImportResult.Imported("txn-1", "rem-1") },
-    ) = ImportRepository(import, sync, source, captured, FakeTokenStore(), uk.co.prisom.directbanking.parsing.ParserRegistry(), ApiFactory.json, autoImport = auto, clock = { 5_000L })
+        resolveTrust: (String, Boolean) -> SourceTrust = { pkg, approved -> TrustedSources.resolveTrust(SignatureInspector.None, pkg, approved) },
+    ) = ImportRepository(import, sync, source, captured, FakeTokenStore(), uk.co.prisom.directbanking.parsing.ParserRegistry(), ApiFactory.json, autoImport = auto, resolveTrust = resolveTrust, clock = { 5_000L })
 
     @Test fun `built-in Monzo source is automatically trusted`() = runTest {
         val (s, i, y) = store()
@@ -208,6 +209,38 @@ class ImportRepositoryTest {
         val out = repo(s, i, y, auto = { AutoImportResult.Failed }).capture(raw("co.uk.getmondo", "You spent £12.45 at Tesco"), "Monzo")
         assertEquals(ImportOutcome.SYNC_FAILED, out.outcome)
         assertTrue(y.ops.any { it.type == "AUTO_IMPORT" })
+    }
+
+    @Test fun `a PACKAGE_ID_ONLY built-in bank still auto-imports and reports its trust level`() = runTest {
+        val (s, i, y) = store(src("co.uk.getmondo", "Monzo", trusted = true))
+        // Built-in Monzo, no signing pins configured → PACKAGE_ID_ONLY.
+        val trust = { _: String, _: Boolean -> SourceTrust(SourceTrustLevel.PACKAGE_ID_ONLY, builtIn = true, signatureChecked = true, signatureMatched = null, signingSha256Abbrev = "AABBCCDD…11223344") }
+        val out = repo(s, i, y, resolveTrust = trust).capture(raw("co.uk.getmondo", "You spent £12.45 at Tesco"), "Monzo")
+        assertEquals(ImportOutcome.AUTO_IMPORTED, out.outcome)
+        assertEquals("PACKAGE_ID_ONLY", out.trustLevel)
+        assertTrue(out.builtInTrusted)
+    }
+
+    @Test fun `a USER_APPROVED source still auto-imports per its settings`() = runTest {
+        val (s, i, y) = store(src("com.example.wallet", "Wallet")) // approved, auto on, account mapped
+        val trust = { _: String, _: Boolean -> SourceTrust(SourceTrustLevel.USER_APPROVED, builtIn = false, signatureChecked = true, signatureMatched = null, signingSha256Abbrev = null) }
+        val out = repo(s, i, y, resolveTrust = trust).capture(raw("com.example.wallet", "You spent £12.45 at Tesco"), "Wallet")
+        assertEquals(ImportOutcome.AUTO_IMPORTED, out.outcome)
+        assertEquals("USER_APPROVED", out.trustLevel)
+        assertEquals(false, out.builtInTrusted)
+    }
+
+    @Test fun `a built-in package with a mismatched signature is not auto-trusted`() = runTest {
+        val (s, i, y) = store(); val cap = FakeCapturedDao()
+        // Attacker ships co.uk.getmondo signed by the wrong key → resolveTrust reports UNAPPROVED.
+        val trust = { _: String, _: Boolean -> SourceTrust(SourceTrustLevel.UNAPPROVED, builtIn = true, signatureChecked = true, signatureMatched = false, signingSha256Abbrev = "DEADBEEF…DEADBEEF") }
+        val out = repo(s, i, y, cap, resolveTrust = trust).capture(raw("co.uk.getmondo", "You spent £5 at Tesco"), "Monzo")
+        assertEquals(ImportOutcome.SETUP_REQUIRED, out.outcome)
+        val row = s.rows["co.uk.getmondo"]!!
+        assertEquals(false, row.approved)
+        assertEquals(false, row.autoImportEnabled)
+        assertEquals(false, row.isBuiltInTrusted)
+        assertTrue(i.rows.isEmpty())
     }
 
     @Test fun `nothing is captured before disclosure is accepted`() = runTest {
