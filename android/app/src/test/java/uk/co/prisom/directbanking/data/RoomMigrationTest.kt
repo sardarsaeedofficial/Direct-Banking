@@ -49,6 +49,25 @@ class RoomMigrationTest {
         return FrameworkSQLiteOpenHelperFactory().create(config).writableDatabase
     }
 
+    /** Opens a v2 database: approved_source now carries the `ignored` column added in 1→2. */
+    private fun openV2(name: String): SupportSQLiteDatabase {
+        context.deleteDatabase(name)
+        val config = SupportSQLiteOpenHelper.Configuration.builder(context)
+            .name(name)
+            .callback(object : SupportSQLiteOpenHelper.Callback(2) {
+                override fun onCreate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        "CREATE TABLE `approved_source` (`packageName` TEXT NOT NULL, `label` TEXT NOT NULL, " +
+                            "`approved` INTEGER NOT NULL, `firstObservedMillis` INTEGER NOT NULL, " +
+                            "`lastSeenMillis` INTEGER NOT NULL, `ignored` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`packageName`))",
+                    )
+                }
+                override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+            })
+            .build()
+        return FrameworkSQLiteOpenHelperFactory().create(config).writableDatabase
+    }
+
     @Test
     fun `migration 1 to 2 adds ignored column and preserves data`() {
         val db = openV1("mig-test.db")
@@ -72,6 +91,41 @@ class RoomMigrationTest {
         db.execSQL("UPDATE approved_source SET ignored = 1 WHERE packageName='com.bank'")
         db.query("SELECT ignored FROM approved_source WHERE packageName='com.bank'").use { c ->
             c.moveToFirst(); assertEquals(1, c.getInt(0))
+        }
+        db.close()
+    }
+
+    @Test
+    fun `migration 2 to 3 adds auto-import columns and preserves data`() {
+        val db = openV2("mig-test-2-3.db")
+        db.execSQL("INSERT INTO approved_source VALUES ('com.bank', 'Bank', 1, 100, 200, 0)")
+
+        DirectBankingDatabase.MIGRATION_2_3.migrate(db)
+
+        // Existing source is preserved and gains the four auto-import columns with safe defaults.
+        db.query(
+            "SELECT approved, ignored, autoImportEnabled, requireReview, defaultAccountId, isBuiltInTrusted " +
+                "FROM approved_source WHERE packageName='com.bank'",
+        ).use { c ->
+            c.moveToFirst()
+            assertEquals(1, c.getInt(0)) // still approved
+            assertEquals(0, c.getInt(1)) // still not ignored
+            assertEquals(0, c.getInt(2)) // auto-import off by default (opt-in)
+            assertEquals(0, c.getInt(3)) // require-review off by default
+            assertEquals(true, c.isNull(4)) // no linked account by default
+            assertEquals(0, c.getInt(5)) // not a built-in trusted source by default
+        }
+
+        // The new columns are writable and persist (approving a source with a linked account).
+        db.execSQL(
+            "UPDATE approved_source SET autoImportEnabled = 1, defaultAccountId = 'acc1', isBuiltInTrusted = 1 " +
+                "WHERE packageName='com.bank'",
+        )
+        db.query("SELECT autoImportEnabled, defaultAccountId, isBuiltInTrusted FROM approved_source WHERE packageName='com.bank'").use { c ->
+            c.moveToFirst()
+            assertEquals(1, c.getInt(0))
+            assertEquals("acc1", c.getString(1))
+            assertEquals(1, c.getInt(2))
         }
         db.close()
     }

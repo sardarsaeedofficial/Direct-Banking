@@ -1,11 +1,12 @@
 import { Router } from "express";
-import { NotifStatus } from "@prisma/client";
+import { NotifStatus, Prisma } from "@prisma/client";
 import {
   mobileLoginSchema,
   mobileRegisterSchema,
   mobileRefreshSchema,
   mobileLogoutSchema,
   notifImportCreateSchema,
+  notifAutoImportSchema,
   notifImportPatchSchema,
   notifImportQuerySchema,
 } from "@direct-banking/shared";
@@ -216,6 +217,88 @@ mobileRouter.post(
       },
     });
     res.status(201).json({ import: created, duplicate: false });
+  }),
+);
+
+// Atomic auto-import: create the (already-approved) import AND its transaction in
+// a single database transaction, with the balance updated exactly once. Idempotent
+// by fingerprint — retries and repeated callbacks never create a second
+// transaction or move the balance twice.
+mobileRouter.post(
+  "/notification-imports/auto",
+  requireMobileAuth,
+  validate(notifAutoImportSchema),
+  asyncHandler(async (req, res) => {
+    const c = validated<typeof notifAutoImportSchema>(res);
+    const userId = req.mobileAuth!.userId;
+
+    const account = await prisma.bankAccount.findFirst({ where: { id: c.accountId, userId } });
+    if (!account) throw new HttpError(404, "Account not found");
+
+    // Fast-path duplicate: return the existing result without any change.
+    const existing = await prisma.notificationImport.findUnique({ where: { userId_sourceHash: { userId, sourceHash: c.fingerprint } } });
+    if (existing) {
+      const txn = existing.approvedTransactionId
+        ? await prisma.transaction.findUnique({ where: { id: existing.approvedTransactionId }, include: { merchant: true, category: true, account: true } })
+        : null;
+      res.status(200).json({ import: existing, transaction: txn, duplicate: true, result: "DUPLICATE" });
+      return;
+    }
+
+    try {
+      const out = await prisma.$transaction(async (tx) => {
+        const importRow = await tx.notificationImport.create({
+          data: {
+            userId,
+            deviceId: req.mobileAuth!.deviceRowId,
+            sourcePackage: c.sourcePackage,
+            title: c.title || (c.merchant ?? "Transaction"),
+            message: c.redactedSourceText,
+            redactedText: c.redactedSourceText,
+            receivedAt: new Date(c.occurredAt),
+            parsedMerchant: c.merchant ?? null,
+            parsedAmountMinor: BigInt(c.amountMinor),
+            parsedAccount: c.accountHint ?? null,
+            direction: c.direction,
+            currency: c.currency,
+            confidence: c.confidence,
+            reviewState: reviewStateFor(c.confidence),
+            sourceHash: c.fingerprint,
+            status: NotifStatus.APPROVED,
+          },
+        });
+        const txn = await createTransaction(
+          userId,
+          {
+            accountId: c.accountId,
+            direction: c.direction,
+            status: "COMPLETED",
+            source: "NOTIFICATION",
+            amountMinor: c.amountMinor,
+            currency: c.currency,
+            bookedAt: new Date(c.occurredAt),
+            description: c.merchant ?? c.title,
+            merchantName: c.merchant ?? c.title,
+            categoryId: c.categoryId ?? undefined,
+          },
+          tx,
+        );
+        const updated = await tx.notificationImport.update({ where: { id: importRow.id }, data: { approvedTransactionId: txn.id } });
+        return { import: updated, transaction: txn };
+      });
+      res.status(201).json({ ...out, duplicate: false, result: "AUTO_IMPORTED" });
+    } catch (err) {
+      // Concurrent duplicate (unique userId+sourceHash) → return the existing result.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        const dup = await prisma.notificationImport.findUnique({ where: { userId_sourceHash: { userId, sourceHash: c.fingerprint } } });
+        const txn = dup?.approvedTransactionId
+          ? await prisma.transaction.findUnique({ where: { id: dup.approvedTransactionId }, include: { merchant: true, category: true, account: true } })
+          : null;
+        res.status(200).json({ import: dup, transaction: txn, duplicate: true, result: "DUPLICATE" });
+        return;
+      }
+      throw err;
+    }
   }),
 );
 

@@ -19,7 +19,7 @@ interface ImportDao {
     @Query("SELECT * FROM parsed_import ORDER BY createdAtMillis DESC")
     fun observeAll(): Flow<List<ParsedImportEntity>>
 
-    @Query("SELECT * FROM parsed_import WHERE reviewState IN ('DRAFT','REVIEW_REQUIRED') AND localStatus NOT IN ('APPROVED','REJECTED') ORDER BY createdAtMillis DESC")
+    @Query("SELECT * FROM parsed_import WHERE reviewState IN ('DRAFT','REVIEW_REQUIRED','UNRECOGNISED') AND localStatus NOT IN ('APPROVED','REJECTED','AUTO_IMPORTED','AUTO_PENDING') ORDER BY createdAtMillis DESC")
     fun observeReviewQueue(): Flow<List<ParsedImportEntity>>
 
     @Query("UPDATE parsed_import SET localStatus = :status, remoteId = :remoteId WHERE fingerprint = :fingerprint")
@@ -39,6 +39,14 @@ interface CapturedDao {
 
     @Query("DELETE FROM captured_notification WHERE id = :id")
     suspend fun delete(id: Long)
+
+    // Keep the most recent (redacted) notification per source so it can be
+    // reprocessed immediately after the user approves/maps that source.
+    @Query("SELECT * FROM captured_notification WHERE sourcePackage = :pkg ORDER BY capturedAtMillis DESC LIMIT 1")
+    suspend fun latestForSource(pkg: String): CapturedNotificationEntity?
+
+    @Query("DELETE FROM captured_notification WHERE sourcePackage = :pkg")
+    suspend fun deleteForSource(pkg: String)
 
     @Query("DELETE FROM captured_notification")
     suspend fun clear()
@@ -71,6 +79,10 @@ data class SourceWithCount(
     val label: String,
     val approved: Boolean,
     val ignored: Boolean,
+    val autoImportEnabled: Boolean,
+    val requireReview: Boolean,
+    val defaultAccountId: String?,
+    val isBuiltInTrusted: Boolean,
     val firstObservedMillis: Long,
     val lastSeenMillis: Long,
     val importedCount: Int,
@@ -85,8 +97,9 @@ interface SourceDao {
     fun observeAll(): Flow<List<ApprovedSourceEntity>>
 
     @Query(
-        "SELECT s.packageName, s.label, s.approved, s.ignored, s.firstObservedMillis, s.lastSeenMillis, " +
-            "(SELECT COUNT(*) FROM parsed_import p WHERE p.sourcePackage = s.packageName AND p.localStatus = 'APPROVED') AS importedCount " +
+        "SELECT s.packageName, s.label, s.approved, s.ignored, s.autoImportEnabled, s.requireReview, " +
+            "s.defaultAccountId, s.isBuiltInTrusted, s.firstObservedMillis, s.lastSeenMillis, " +
+            "(SELECT COUNT(*) FROM parsed_import p WHERE p.sourcePackage = s.packageName AND (p.localStatus = 'APPROVED' OR p.localStatus = 'AUTO_IMPORTED')) AS importedCount " +
             "FROM approved_source s ORDER BY s.approved DESC, s.label ASC",
     )
     fun observeWithCounts(): Flow<List<SourceWithCount>>
@@ -100,8 +113,20 @@ interface SourceDao {
     @Query("UPDATE approved_source SET approved = :approved WHERE packageName = :pkg")
     suspend fun setApproved(pkg: String, approved: Boolean)
 
-    @Query("UPDATE approved_source SET ignored = :ignored, approved = 0 WHERE packageName = :pkg")
+    @Query("UPDATE approved_source SET ignored = :ignored, approved = 0, autoImportEnabled = 0 WHERE packageName = :pkg")
     suspend fun setIgnored(pkg: String, ignored: Boolean)
+
+    @Query("UPDATE approved_source SET autoImportEnabled = :enabled WHERE packageName = :pkg")
+    suspend fun setAutoImport(pkg: String, enabled: Boolean)
+
+    @Query("UPDATE approved_source SET requireReview = :required WHERE packageName = :pkg")
+    suspend fun setRequireReview(pkg: String, required: Boolean)
+
+    @Query("UPDATE approved_source SET defaultAccountId = :accountId WHERE packageName = :pkg")
+    suspend fun setLinkedAccount(pkg: String, accountId: String?)
+
+    @Query("SELECT * FROM approved_source WHERE approved = 1 AND defaultAccountId IS NULL AND ignored = 0")
+    suspend fun approvedWithoutAccount(): List<ApprovedSourceEntity>
 
     @Query("UPDATE approved_source SET lastSeenMillis = :now WHERE packageName = :pkg")
     suspend fun touch(pkg: String, now: Long)

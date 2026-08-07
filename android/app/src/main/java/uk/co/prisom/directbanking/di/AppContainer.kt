@@ -11,6 +11,7 @@ import uk.co.prisom.directbanking.data.local.security.TokenStore
 import uk.co.prisom.directbanking.data.remote.ApiFactory
 import uk.co.prisom.directbanking.notifications.AppNotifier
 import uk.co.prisom.directbanking.data.repository.AuthRepository
+import uk.co.prisom.directbanking.data.repository.AutoImportResult
 import uk.co.prisom.directbanking.data.repository.DashboardRepository
 import uk.co.prisom.directbanking.data.repository.ImportRepository
 import uk.co.prisom.directbanking.data.repository.SourceRepository
@@ -35,8 +36,22 @@ class AppContainer(context: Context) {
     val transactionRepository = TransactionRepository(apiClients)
     val sourceRepository = SourceRepository(db.sourceDao())
     val importRepository = ImportRepository(
-        db.importDao(), db.syncDao(), db.sourceDao(), tokenStore, ParserRegistry(), json,
+        db.importDao(), db.syncDao(), db.sourceDao(), db.capturedDao(), tokenStore, ParserRegistry(), json,
+        autoImport = { req ->
+            try {
+                val res = apiClients.authApi.autoImport(req)
+                if (res.result == "DUPLICATE") AutoImportResult.Duplicate(res.transaction?.id)
+                else AutoImportResult.Imported(res.transaction?.id ?: "", res.import.id)
+            } catch (_: Throwable) {
+                AutoImportResult.Failed
+            }
+        },
         disclosureAccepted = { appPreferences.disclosureAccepted.first() },
     )
-    val syncRepository = SyncRepository(apiClients.authApi, db.importDao(), db.syncDao(), json)
+    val syncRepository = SyncRepository(
+        apiClients.authApi, db.importDao(), db.syncDao(), json,
+        onAutoImported = { amountMinor, currency, direction, sourceName, txnId ->
+            notifier.postRecorded(amountMinor, currency, direction, sourceName, txnId)
+        },
+    )
 }

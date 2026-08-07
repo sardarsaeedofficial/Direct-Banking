@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -40,7 +41,13 @@ private fun errorText(t: Throwable): String =
 class DashboardViewModel(private val repo: DashboardRepository) : ViewModel() {
     private val _state = MutableStateFlow<Async<DashboardData>>(Async.Loading)
     val state = _state.asStateFlow()
-    init { refresh() }
+    init {
+        refresh()
+        // Auto-refresh when an automatic import records a transaction.
+        viewModelScope.launch {
+            uk.co.prisom.directbanking.data.RefreshSignal.tick.drop(1).collect { refresh() }
+        }
+    }
     fun refresh() = viewModelScope.launch {
         _state.value = Async.Loading
         _state.value = runCatching { repo.load() }.fold({ Async.Success(it) }, { Async.Failure(errorText(it)) })
@@ -131,12 +138,40 @@ class ReviewViewModel(
 
 class SourcesViewModel(
     private val sourceRepository: SourceRepository,
+    private val importRepository: ImportRepository,
+    private val dashboardRepository: DashboardRepository,
     private val appPreferences: AppPreferences,
 ) : ViewModel() {
     val sources: StateFlow<List<SourceWithCount>> =
         sourceRepository.observeSourcesWithCounts().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val disclosureAccepted: StateFlow<Boolean> =
         appPreferences.disclosureAccepted.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    private val _accounts = MutableStateFlow<List<uk.co.prisom.directbanking.data.repository.AccountRef>>(emptyList())
+    val accounts = _accounts.asStateFlow()
+
+    init { loadAccountsAndAutoMap() }
+
+    private fun loadAccountsAndAutoMap() = viewModelScope.launch {
+        runCatching { dashboardRepository.load() }.onSuccess { data ->
+            val refs = data.accounts.map { uk.co.prisom.directbanking.data.repository.AccountRef(it.id, it.nickname, it.bankName) }
+            _accounts.value = refs
+            sourceRepository.autoMapAccounts(refs) // map trusted sources with a clear single match
+        }
+    }
+
+    /** Approve an unknown source, map an account, and reprocess its latest notification. */
+    fun approve(pkg: String, accountId: String?, label: String) = viewModelScope.launch {
+        sourceRepository.approveWithAccount(pkg, accountId)
+        importRepository.reprocessLatest(pkg, label)
+    }
+
+    fun setAutoImport(pkg: String, enabled: Boolean) = viewModelScope.launch { sourceRepository.setAutoImport(pkg, enabled) }
+    fun setRequireReview(pkg: String, required: Boolean) = viewModelScope.launch { sourceRepository.setRequireReview(pkg, required) }
+    fun setLinkedAccount(pkg: String, accountId: String, label: String) = viewModelScope.launch {
+        sourceRepository.setLinkedAccount(pkg, accountId)
+        importRepository.reprocessLatest(pkg, label)
+    }
 
     fun setApproved(pkg: String, approved: Boolean) = viewModelScope.launch { sourceRepository.setApproved(pkg, approved) }
     fun ignore(pkg: String) = viewModelScope.launch { sourceRepository.setIgnored(pkg, true) }

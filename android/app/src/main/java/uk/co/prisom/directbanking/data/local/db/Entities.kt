@@ -61,4 +61,9 @@ data class ApprovedSourceEntity(
     val ignored: Boolean = false, // user chose to permanently ignore this source
     val firstObservedMillis: Long,
     val lastSeenMillis: Long,
+    // Automatic-import configuration (feature/automatic-approved-source-imports).
+    val autoImportEnabled: Boolean = false,
+    val requireReview: Boolean = false, // when true, always queue under Review
+    val defaultAccountId: String? = null, // Direct Banking account this source maps to
+    val isBuiltInTrusted: Boolean = false,
 )
