@@ -132,6 +132,31 @@ data class NotifImportDto(
 @Serializable data class NotifImportListResponse(val items: List<NotifImportDto> = emptyList())
 
 @Serializable
+data class NotifAutoImportRequest(
+    val fingerprint: String,
+    val sourcePackage: String,
+    val direction: String,
+    val amountMinor: Long,
+    val currency: String,
+    val merchant: String? = null,
+    val accountHint: String? = null,
+    val occurredAt: String,
+    val confidence: Double,
+    val redactedSourceText: String = "",
+    val title: String = "",
+    val accountId: String,
+    val categoryId: String? = null,
+)
+
+@Serializable
+data class AutoImportResponse(
+    val import: NotifImportDto,
+    val transaction: TransactionDto? = null,
+    val duplicate: Boolean = false,
+    val result: String = "AUTO_IMPORTED",
+)
+
+@Serializable
 data class NotifImportPatchRequest(
     val action: String,
     val amountMinor: Long? = null,

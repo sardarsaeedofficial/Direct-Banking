@@ -236,6 +236,15 @@ export const notifImportCreateSchema = z.object({
 });
 export type NotifImportCreateInput = z.infer<typeof notifImportCreateSchema>;
 
+// Atomic auto-import: create the import already approved AND its transaction in
+// one server transaction. Requires the destination account and a positive amount.
+export const notifAutoImportSchema = notifImportCreateSchema.extend({
+  amountMinor: minorAmount.positive(),
+  accountId: cuid,
+  categoryId: cuid.optional().nullable(),
+});
+export type NotifAutoImportInput = z.infer<typeof notifAutoImportSchema>;
+
 // Review action for a queued import.
 export const notifImportPatchSchema = z.object({
   action: z.enum(["approve", "reject", "edit"]).default("edit"),

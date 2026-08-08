@@ -57,8 +57,10 @@ async function matchExpectedPayment(
 }
 
 /** Create a transaction, linking merchant, computing the dedupe hash, and
- *  matching an expected payment when applicable. Never overwrites existing rows. */
-export async function createTransaction(userId: string, input: CreateTxnInput) {
+ *  matching an expected payment when applicable. Never overwrites existing rows.
+ *  Pass an existing transaction client to run the create + balance update inside
+ *  a caller's `$transaction` (used by the atomic auto-import operation). */
+export async function createTransaction(userId: string, input: CreateTxnInput, client?: Prisma.TransactionClient) {
   const amountMinor = BigInt(input.amountMinor);
   const merchantId = await linkMerchant(userId, input.merchantName ?? input.description);
   const hash = dedupeHash({
@@ -101,7 +103,7 @@ export async function createTransaction(userId: string, input: CreateTxnInput) {
   // is adjusted atomically with the transaction so the dashboard total stays
   // consistent (ledger = opening + credits − debits). CANCELLED rows don't move money.
   const status = data.status ?? "COMPLETED";
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
     const created = await tx.transaction.create({ data, include: { merchant: true, category: true, account: true } });
     if (status !== "CANCELLED") {
       const delta = input.direction === "INCOME" ? amountMinor : -amountMinor;
@@ -112,7 +114,8 @@ export async function createTransaction(userId: string, input: CreateTxnInput) {
       }
     }
     return created;
-  });
+  };
+  return client ? run(client) : prisma.$transaction(run);
 }
 
 /**

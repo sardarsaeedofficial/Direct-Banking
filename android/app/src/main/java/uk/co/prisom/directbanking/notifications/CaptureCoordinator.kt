@@ -3,15 +3,17 @@ package uk.co.prisom.directbanking.notifications
 import android.content.Context
 import android.content.pm.PackageManager
 import uk.co.prisom.directbanking.data.DiagnosticsRepository
-import uk.co.prisom.directbanking.data.repository.CaptureResult
+import uk.co.prisom.directbanking.data.RefreshSignal
+import uk.co.prisom.directbanking.data.repository.ImportOutcome
 import uk.co.prisom.directbanking.data.repository.ImportRepository
 import uk.co.prisom.directbanking.parsing.Redaction
 import uk.co.prisom.directbanking.sync.SyncScheduler
 
 /**
  * Background handler for captured notifications: resolves the source app label,
- * runs the import pipeline, records redacted diagnostics, kicks a sync when
- * something was queued, and posts a "needs review" notification.
+ * runs the import pipeline, records redacted diagnostics, and — for automatic
+ * imports — posts a "recorded" notification and refreshes the dashboard. Runs
+ * off the listener callback thread.
  */
 class CaptureCoordinator(
     context: Context,
@@ -24,28 +26,43 @@ class CaptureCoordinator(
 
     override suspend fun onCaptured(raw: RawNotification) {
         val label = resolveLabel(raw.packageName)
-        val result = importRepository.capture(raw, label)
+        val o = importRepository.capture(raw, label)
 
-        val resultLabel = when (result) {
-            is CaptureResult.Stored -> if (result.autoQueued) "Queued for review" else "Stored"
-            else -> "Rejected"
-        }
-        // Record only redacted text (account/card numbers masked); never raw text.
         diagnostics.recordCapture(
             pkg = raw.packageName,
-            label = label,
+            label = o.sourceName ?: label,
             receivedAtMillis = raw.postTime,
             redactedTitle = raw.title?.let { Redaction.redact(it) },
             redactedText = (raw.bigText ?: raw.text)?.let { Redaction.redact(it) },
-            result = resultLabel,
-            reason = result.reason,
+            sourceTrustedOrApproved = o.trustedOrApproved,
+            trustLevel = o.trustLevel,
+            builtInTrusted = o.builtInTrusted,
+            signatureChecked = o.signatureChecked,
+            signatureMatched = o.signatureMatched,
+            signingSha256Abbrev = o.signingSha256Abbrev,
+            autoImportEnabled = o.autoImportEnabled,
+            linkedAccountId = o.linkedAccountId,
+            parsedAmountMinor = o.amountMinor,
+            parsedDirection = o.direction,
+            parsedCurrency = o.currency,
+            confidence = o.confidence,
+            importResult = o.outcome.name,
+            transactionId = o.transactionId,
+            failureReason = o.reason,
         )
 
-        if (result is CaptureResult.Stored) {
-            if (result.autoQueued) SyncScheduler.syncNow(appContext)
-            if (result.reviewState != "UNRECOGNISED") {
-                notifier.postReview(result.amountMinor, result.currency, result.merchant)
+        when (o.outcome) {
+            ImportOutcome.AUTO_IMPORTED -> {
+                notifier.postRecorded(o.amountMinor ?: 0, o.currency ?: "GBP", o.direction ?: "EXPENSE", o.sourceName ?: label, o.transactionId)
+                RefreshSignal.trigger()
+                SyncScheduler.syncNow(appContext)
             }
+            ImportOutcome.REVIEW_REQUIRED -> {
+                SyncScheduler.syncNow(appContext)
+                notifier.postReview(o.amountMinor ?: 0, o.currency ?: "GBP", o.merchant)
+            }
+            ImportOutcome.SYNC_FAILED -> SyncScheduler.syncNow(appContext) // retry the queued auto op
+            ImportOutcome.SETUP_REQUIRED, ImportOutcome.DUPLICATE, ImportOutcome.REJECTED -> Unit
         }
     }
 

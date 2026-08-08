@@ -12,8 +12,21 @@ data class DiagnosticsSnapshot(
     val lastReceivedAtMillis: Long? = null,
     val lastRedactedTitle: String? = null,
     val lastRedactedText: String? = null,
-    val lastResult: String? = null,
-    val lastReason: String? = null,
+    val sourceTrustedOrApproved: Boolean = false,
+    val trustLevel: String? = null,
+    val builtInTrusted: Boolean = false,
+    val signatureChecked: Boolean = false,
+    val signatureMatched: Boolean? = null,
+    val signingSha256Abbrev: String? = null,
+    val autoImportEnabled: Boolean = false,
+    val linkedAccountId: String? = null,
+    val parsedAmountMinor: Long? = null,
+    val parsedDirection: String? = null,
+    val parsedCurrency: String? = null,
+    val confidence: Double? = null,
+    val importResult: String? = null,
+    val transactionId: String? = null,
+    val failureReason: String? = null,
 )
 
 /** In-memory diagnostics for the notification pipeline (no raw text retained). */
@@ -25,14 +38,28 @@ class DiagnosticsRepository {
         _state.value = _state.value.copy(listenerConnected = connected)
     }
 
+    @Suppress("LongParameterList")
     fun recordCapture(
         pkg: String,
         label: String?,
         receivedAtMillis: Long,
         redactedTitle: String?,
         redactedText: String?,
-        result: String,
-        reason: String,
+        sourceTrustedOrApproved: Boolean,
+        trustLevel: String?,
+        builtInTrusted: Boolean,
+        signatureChecked: Boolean,
+        signatureMatched: Boolean?,
+        signingSha256Abbrev: String?,
+        autoImportEnabled: Boolean,
+        linkedAccountId: String?,
+        parsedAmountMinor: Long?,
+        parsedDirection: String?,
+        parsedCurrency: String?,
+        confidence: Double?,
+        importResult: String,
+        transactionId: String?,
+        failureReason: String,
     ) {
         _state.value = _state.value.copy(
             lastPackage = pkg,
@@ -40,8 +67,21 @@ class DiagnosticsRepository {
             lastReceivedAtMillis = receivedAtMillis,
             lastRedactedTitle = redactedTitle,
             lastRedactedText = redactedText,
-            lastResult = result,
-            lastReason = reason,
+            sourceTrustedOrApproved = sourceTrustedOrApproved,
+            trustLevel = trustLevel,
+            builtInTrusted = builtInTrusted,
+            signatureChecked = signatureChecked,
+            signatureMatched = signatureMatched,
+            signingSha256Abbrev = signingSha256Abbrev,
+            autoImportEnabled = autoImportEnabled,
+            linkedAccountId = linkedAccountId,
+            parsedAmountMinor = parsedAmountMinor,
+            parsedDirection = parsedDirection,
+            parsedCurrency = parsedCurrency,
+            confidence = confidence,
+            importResult = importResult,
+            transactionId = transactionId,
+            failureReason = failureReason,
         )
     }
 }

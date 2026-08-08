@@ -26,6 +26,7 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -118,36 +119,83 @@ fun NotificationAccessScreen(onManageSources: () -> Unit) {
 @Composable
 fun ApprovedSourcesScreen(vm: SourcesViewModel) {
     val sources by vm.sources.collectAsStateWithLifecycle()
+    val accounts by vm.accounts.collectAsStateWithLifecycle()
     Column(Modifier.fillMaxSize()) {
-        Text("Approved notification sources", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(16.dp))
+        Text("Notification sources", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(16.dp))
         if (sources.isEmpty()) {
-            EmptyState("No notification sources observed yet. Once a financial app posts a notification while access is granted, it will appear here for you to approve.")
+            EmptyState("No notification sources observed yet. Trusted banking apps are approved automatically; other apps appear here for you to approve.")
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
-                items(sources, key = { it.packageName }) { s -> SourceRow(s, vm) }
+                items(sources, key = { it.packageName }) { s -> SourceRow(s, accounts, vm) }
             }
         }
     }
 }
 
 @Composable
-private fun SourceRow(s: SourceWithCount, vm: SourcesViewModel) {
+private fun SourceRow(
+    s: uk.co.prisom.directbanking.data.local.db.SourceWithCount,
+    accounts: List<uk.co.prisom.directbanking.data.repository.AccountRef>,
+    vm: SourcesViewModel,
+) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(s.label.ifBlank { s.packageName }, style = MaterialTheme.typography.titleMedium)
-                Text(s.packageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(
-                    "Last seen ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(s.lastSeenMillis))} · ${s.importedCount} imported",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                if (s.ignored) Text("Ignored", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(s.label.ifBlank { s.packageName }, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                if (s.isBuiltInTrusted) Text("Trusted", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
             }
-            Switch(checked = s.approved, onCheckedChange = { vm.setApproved(s.packageName, it) })
+            Text(s.packageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "Last seen ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(s.lastSeenMillis))} · ${s.importedCount} imported",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (s.ignored) Text("Ignored", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
         }
-        if (!s.ignored) {
-            TextButton(onClick = { vm.ignore(s.packageName) }) { Text("Permanently ignore") }
+
+        if (s.ignored) { HorizontalDivider(); return@Column }
+
+        if (!s.approved) {
+            Spacer(Modifier.height(6.dp))
+            var chosen by remember(s.packageName) { mutableStateOf(accounts.firstOrNull()?.id) }
+            AccountPicker("Account for imports", chosen, accounts) { chosen = it }
+            Button(onClick = { vm.approve(s.packageName, chosen ?: accounts.firstOrNull()?.id, s.label) }, modifier = Modifier.fillMaxWidth()) {
+                Text("Approve and start recording")
+            }
+        } else {
+            SettingSwitch("Automatically record transactions", s.autoImportEnabled) { vm.setAutoImport(s.packageName, it) }
+            SettingSwitch("Require review for every transaction", s.requireReview) { vm.setRequireReview(s.packageName, it) }
+            val current = accounts.firstOrNull { it.id == s.defaultAccountId }?.name ?: "not mapped"
+            AccountPicker("Linked account: $current", s.defaultAccountId, accounts) { vm.setLinkedAccount(s.packageName, it, s.label) }
         }
+        TextButton(onClick = { vm.ignore(s.packageName) }) { Text("Permanently ignore") }
         HorizontalDivider()
+    }
+}
+
+@Composable
+private fun SettingSwitch(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+@Composable
+private fun AccountPicker(
+    label: String,
+    selectedId: String?,
+    accounts: List<uk.co.prisom.directbanking.data.repository.AccountRef>,
+    onSelect: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        androidx.compose.material3.OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+            Text(accounts.firstOrNull { it.id == selectedId }?.name ?: label)
+        }
+        androidx.compose.material3.DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            accounts.forEach { a ->
+                androidx.compose.material3.DropdownMenuItem(text = { Text(a.name) }, onClick = { onSelect(a.id); expanded = false })
+            }
+        }
     }
 }

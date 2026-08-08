@@ -141,7 +141,7 @@ private fun MainNav(session: SessionViewModel) {
             }
             composable(Routes.SOURCES) {
                 SourcesTab(
-                    vm = containerViewModel { SourcesViewModel(it.sourceRepository, it.appPreferences) },
+                    vm = containerViewModel { SourcesViewModel(it.sourceRepository, it.importRepository, it.dashboardRepository, it.appPreferences) },
                     onAccess = { nav.navigate(Routes.ACCESS) },
                     onDashboard = { nav.navigate(Routes.DASHBOARD) },
                 )

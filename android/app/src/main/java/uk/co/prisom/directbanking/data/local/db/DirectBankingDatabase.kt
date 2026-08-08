@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PendingSyncOpEntity::class,
         ApprovedSourceEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 abstract class DirectBankingDatabase : RoomDatabase() {
@@ -31,7 +31,17 @@ abstract class DirectBankingDatabase : RoomDatabase() {
             }
         }
 
-        val ALL_MIGRATIONS = arrayOf(MIGRATION_1_2)
+        /** v3 adds automatic-import configuration columns to approved_source (additive). */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `approved_source` ADD COLUMN `autoImportEnabled` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `approved_source` ADD COLUMN `requireReview` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `approved_source` ADD COLUMN `defaultAccountId` TEXT")
+                db.execSQL("ALTER TABLE `approved_source` ADD COLUMN `isBuiltInTrusted` INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        val ALL_MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3)
 
         fun build(context: Context): DirectBankingDatabase =
             Room.databaseBuilder(context, DirectBankingDatabase::class.java, "directbanking.db")

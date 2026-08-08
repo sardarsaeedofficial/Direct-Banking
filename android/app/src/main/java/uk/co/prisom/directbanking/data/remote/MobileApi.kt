@@ -13,6 +13,8 @@ import uk.co.prisom.directbanking.data.remote.dto.LoginRequest
 import uk.co.prisom.directbanking.data.remote.dto.LoginResponse
 import uk.co.prisom.directbanking.data.remote.dto.LogoutRequest
 import uk.co.prisom.directbanking.data.remote.dto.MeResponse
+import uk.co.prisom.directbanking.data.remote.dto.AutoImportResponse
+import uk.co.prisom.directbanking.data.remote.dto.NotifAutoImportRequest
 import uk.co.prisom.directbanking.data.remote.dto.NotifImportCreateResponse
 import uk.co.prisom.directbanking.data.remote.dto.NotifImportListResponse
 import uk.co.prisom.directbanking.data.remote.dto.NotifImportPatchRequest
@@ -51,6 +53,9 @@ interface MobileApi {
 
     @POST("api/mobile/v1/notification-imports")
     suspend fun createImport(@Body body: NotifImportRequest): NotifImportCreateResponse
+
+    @POST("api/mobile/v1/notification-imports/auto")
+    suspend fun autoImport(@Body body: NotifAutoImportRequest): AutoImportResponse
 
     @GET("api/mobile/v1/notification-imports")
     suspend fun listImports(
