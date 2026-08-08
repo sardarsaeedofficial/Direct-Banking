@@ -146,6 +146,13 @@ data class NotifAutoImportRequest(
     val title: String = "",
     val accountId: String,
     val categoryId: String? = null,
+    // Phase 1 enrichment (all optional; never required).
+    val senderName: String? = null,
+    val recipientName: String? = null,
+    val senderBankName: String? = null,
+    val recipientBankName: String? = null,
+    val paymentReference: String? = null,
+    val paymentReason: String? = null,
 )
 
 @Serializable
@@ -189,6 +196,41 @@ data class TransactionItemDto(
     val account: TxnAccountRef? = null,
     val category: TxnCategoryRef? = null,
     val merchant: TxnMerchantRef? = null,
+    // Phase 1 rich ledger fields (all nullable; omitted fields simply aren't shown).
+    val transactionType: String? = null,
+    val source: String? = null,
+    val merchantName: String? = null,
+    val senderName: String? = null,
+    val senderBankName: String? = null,
+    val recipientName: String? = null,
+    val recipientBankName: String? = null,
+    val paymentReference: String? = null,
+    val paymentReason: String? = null,
+    val notes: String? = null,
+    val subcategory: String? = null,
+    val occurredAt: String? = null,
+    val settledAt: String? = null,
+    val internalTransferGroupId: String? = null,
+    val internalTransferConfidence: String? = null,
 )
 
 @Serializable data class TransactionListResponse(val items: List<TransactionItemDto> = emptyList(), val count: Int = 0)
+
+// Manual ledger correction --------------------------------------------------
+@Serializable
+data class TxnCorrectionRequest(
+    val transactionType: String? = null,
+    val categoryId: String? = null,
+    val subcategory: String? = null,
+    val senderName: String? = null,
+    val senderBankName: String? = null,
+    val recipientName: String? = null,
+    val recipientBankName: String? = null,
+    val notes: String? = null,
+    val paymentReason: String? = null,
+    val paymentReference: String? = null,
+    val markInternalTransfer: Boolean? = null,
+    val counterpartyAccountId: String? = null,
+)
+
+@Serializable data class TxnCorrectionResponse(val transaction: TransactionItemDto)

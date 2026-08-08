@@ -134,7 +134,7 @@ private fun MainNav(session: SessionViewModel) {
                 )
             }
             composable(Routes.TRANSACTIONS) {
-                TransactionsScreen(containerViewModel { TransactionsViewModel(it.transactionRepository) })
+                TransactionsScreen(containerViewModel { TransactionsViewModel(it.transactionRepository, it.dashboardRepository) })
             }
             composable(Routes.REVIEW) {
                 ReviewImportsScreen(containerViewModel { ReviewViewModel(it.importRepository, it.authRepository, it.appContext) })

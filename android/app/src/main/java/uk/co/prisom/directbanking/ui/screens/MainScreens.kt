@@ -123,41 +123,6 @@ fun DashboardScreen(
 }
 
 @Composable
-fun TransactionsScreen(vm: TransactionsViewModel) {
-    val state by vm.state.collectAsStateWithLifecycle()
-    when (val s = state) {
-        is Async.Loading -> LoadingBox()
-        is Async.Failure -> MessageBox(s.message)
-        is Async.Success -> if (s.data.isEmpty()) EmptyState("No transactions yet.") else LazyColumn(Modifier.fillMaxSize()) {
-            items(s.data, key = { it.id }) { TransactionRow(it) }
-        }
-    }
-}
-
-@Composable
-private fun TransactionRow(t: TransactionSummary) {
-    val income = t.direction == "INCOME"
-    Column {
-        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(t.description, style = MaterialTheme.typography.titleMedium)
-                Text(
-                    listOfNotNull(t.category, t.account, t.bookedAt?.take(10)).joinToString(" · "),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Text(
-                (if (income) "+" else "-") + money(t.amountMinor, t.currency),
-                color = if (income) DirectBankingColors.income else DirectBankingColors.expense,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-        HorizontalDivider()
-    }
-}
-
-@Composable
 fun AccountsScreen(vm: OverviewViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     when (val s = state) {

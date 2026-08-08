@@ -40,6 +40,33 @@ enum TxnSource {
   CSV_IMPORT
   NOTIFICATION
   OPEN_BANKING
+  STATEMENT_IMPORT
+}
+
+// Canonical ledger classification for a transaction (Phase 1). Distinct from the
+// coarse TxnDirection so the ledger can tell real income/spending apart from
+// transfers between the user's own accounts.
+enum TxnType {
+  INCOME
+  PURCHASE
+  INTERNAL_TRANSFER
+  DIRECT_DEBIT
+  STANDING_ORDER
+  CASH_WITHDRAWAL
+  BANK_FEE
+  REFUND
+  TRANSFER
+  OTHER
+}
+
+// How sure we are that a transaction is a transfer between the same user's own
+// accounts. Only CONFIRMED/HIGH are treated as internal automatically; POSSIBLE
+// is surfaced for the user to confirm.
+enum TransferConfidence {
+  CONFIRMED
+  HIGH
+  POSSIBLE
+  NOT_INTERNAL
 }
 
 enum RecurringType {
@@ -175,6 +202,14 @@ model BankAccount {
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
 
+  // Account-holder identity (Phase 1). Masked forms only — never store full
+  // sensitive banking identifiers when a masked representation is sufficient.
+  accountHolderName   String?
+  sortCodeMasked      String?
+  accountNumberMasked String?
+  ibanMasked          String?
+  providerAccountId   String? // stable id from an Open Banking / statement provider
+
   transactions Transaction[]      @relation("AccountTransactions")
   transfersIn  Transaction[]      @relation("TransferCounterparty")
   recurring    RecurringPayment[]
@@ -267,6 +302,46 @@ model Transaction {
   importBatch       ImportBatch?     @relation(fields: [importBatchId], references: [id])
   dedupeHash        String?
 
+  // ---- Phase 1: rich ledger fields (all additive & nullable) ----
+  // Canonical classification, above and beyond the coarse `direction`.
+  transactionType TxnType?
+
+  // Counterparties. senderAccountId/recipientAccountId are soft references to the
+  // user's own BankAccount when known (no FK — a counterparty may be unknown).
+  senderName           String?
+  senderBankName       String?
+  senderAccountId      String?
+  senderAccountHint    String?
+  recipientName        String?
+  recipientBankName    String?
+  recipientAccountId   String?
+  recipientAccountHint String?
+
+  // Free-text merchant name (distinct from the normalised Merchant relation).
+  merchantName String?
+
+  // Timing beyond the canonical bookedAt.
+  occurredAt DateTime?
+  settledAt  DateTime?
+
+  // Description/reference/reason surfaced in the detail screen.
+  paymentReference String?
+  bankDescription  String?
+  paymentReason    String?
+
+  // Provenance of a notification/open-banking sourced row.
+  sourceBankPackage       String?
+  sourceBankTransactionId String?
+
+  // Internal-transfer pairing. Both sides of a detected own-account transfer share
+  // the same group id; confidence records how it was decided.
+  internalTransferGroupId    String?
+  internalTransferConfidence TransferConfidence?
+
+  // Category refinement + safely-redacted original description.
+  subcategory            String?
+  rawDescriptionRedacted String?
+
   attachments Attachment[]
 
   createdAt DateTime @default(now())
@@ -276,6 +351,8 @@ model Transaction {
   @@index([accountId, bookedAt])
   @@index([merchantId])
   @@index([userId, dedupeHash])
+  @@index([userId, internalTransferGroupId])
+  @@index([userId, transactionType])
 }
 
 model RecurringPayment {

@@ -24,6 +24,8 @@ import uk.co.prisom.directbanking.data.remote.dto.RefreshRequest
 import uk.co.prisom.directbanking.data.remote.dto.RegisterRequest
 import uk.co.prisom.directbanking.data.remote.dto.TokenResponse
 import uk.co.prisom.directbanking.data.remote.dto.TransactionListResponse
+import uk.co.prisom.directbanking.data.remote.dto.TxnCorrectionRequest
+import uk.co.prisom.directbanking.data.remote.dto.TxnCorrectionResponse
 
 /** Retrofit binding for the Direct Banking mobile API (/api/mobile/v1). */
 interface MobileApi {
@@ -50,6 +52,9 @@ interface MobileApi {
         @Query("limit") limit: Int = 50,
         @Query("accountId") accountId: String? = null,
     ): TransactionListResponse
+
+    @PATCH("api/mobile/v1/transactions/{id}")
+    suspend fun correctTransaction(@Path("id") id: String, @Body body: TxnCorrectionRequest): TxnCorrectionResponse
 
     @POST("api/mobile/v1/notification-imports")
     suspend fun createImport(@Body body: NotifImportRequest): NotifImportCreateResponse

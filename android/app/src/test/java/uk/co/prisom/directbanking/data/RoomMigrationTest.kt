@@ -68,6 +68,27 @@ class RoomMigrationTest {
         return FrameworkSQLiteOpenHelperFactory().create(config).writableDatabase
     }
 
+    /** Opens a v3 database with the parsed_import table as it stood before v4. */
+    private fun openV3(name: String): SupportSQLiteDatabase {
+        context.deleteDatabase(name)
+        val config = SupportSQLiteOpenHelper.Configuration.builder(context)
+            .name(name)
+            .callback(object : SupportSQLiteOpenHelper.Callback(3) {
+                override fun onCreate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        "CREATE TABLE `parsed_import` (`fingerprint` TEXT NOT NULL, `sourcePackage` TEXT NOT NULL, " +
+                            "`direction` TEXT NOT NULL, `amountMinor` INTEGER NOT NULL, `currency` TEXT NOT NULL, " +
+                            "`merchant` TEXT, `accountHint` TEXT, `occurredAtMillis` INTEGER NOT NULL, `confidence` REAL NOT NULL, " +
+                            "`reviewState` TEXT NOT NULL, `redactedText` TEXT NOT NULL, `title` TEXT NOT NULL, " +
+                            "`localStatus` TEXT NOT NULL, `remoteId` TEXT, `createdAtMillis` INTEGER NOT NULL, PRIMARY KEY(`fingerprint`))",
+                    )
+                }
+                override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+            })
+            .build()
+        return FrameworkSQLiteOpenHelperFactory().create(config).writableDatabase
+    }
+
     @Test
     fun `migration 1 to 2 adds ignored column and preserves data`() {
         val db = openV1("mig-test.db")
@@ -126,6 +147,38 @@ class RoomMigrationTest {
             assertEquals(1, c.getInt(0))
             assertEquals("acc1", c.getString(1))
             assertEquals(1, c.getInt(2))
+        }
+        db.close()
+    }
+
+    @Test
+    fun `migration 3 to 4 adds enrichment columns and preserves parsed drafts`() {
+        val db = openV3("mig-test-3-4.db")
+        db.execSQL(
+            "INSERT INTO parsed_import VALUES " +
+                "('fp1','com.bank','EXPENSE',1245,'GBP','Tesco',NULL,1000,0.95,'DRAFT','txt','Tesco','LOCAL',NULL,500)",
+        )
+
+        DirectBankingDatabase.MIGRATION_3_4.migrate(db)
+
+        // Existing draft survives and gains the four nullable enrichment columns.
+        db.query(
+            "SELECT amountMinor, senderName, recipientName, paymentReference, paymentReason FROM parsed_import WHERE fingerprint='fp1'",
+        ).use { c ->
+            c.moveToFirst()
+            assertEquals(1245, c.getInt(0)) // preserved
+            assertEquals(true, c.isNull(1)) // enrichment null by default
+            assertEquals(true, c.isNull(2))
+            assertEquals(true, c.isNull(3))
+            assertEquals(true, c.isNull(4))
+        }
+
+        // The new columns are writable and persist.
+        db.execSQL("UPDATE parsed_import SET recipientName='Sardar Saeed', paymentReference='INV-9' WHERE fingerprint='fp1'")
+        db.query("SELECT recipientName, paymentReference FROM parsed_import WHERE fingerprint='fp1'").use { c ->
+            c.moveToFirst()
+            assertEquals("Sardar Saeed", c.getString(0))
+            assertEquals("INV-9", c.getString(1))
         }
         db.close()
     }

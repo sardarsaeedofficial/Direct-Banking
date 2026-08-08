@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -24,6 +25,8 @@ import uk.co.prisom.directbanking.data.repository.ImportRepository
 import uk.co.prisom.directbanking.data.repository.SourceRepository
 import uk.co.prisom.directbanking.data.repository.SyncRepository
 import uk.co.prisom.directbanking.data.repository.TransactionRepository
+import uk.co.prisom.directbanking.data.RefreshSignal
+import uk.co.prisom.directbanking.domain.AccountSummary
 import uk.co.prisom.directbanking.domain.DashboardData
 import uk.co.prisom.directbanking.domain.TransactionSummary
 import uk.co.prisom.directbanking.sync.SyncScheduler
@@ -54,13 +57,88 @@ class DashboardViewModel(private val repo: DashboardRepository) : ViewModel() {
     }
 }
 
-class TransactionsViewModel(private val repo: TransactionRepository) : ViewModel() {
-    private val _state = MutableStateFlow<Async<List<TransactionSummary>>>(Async.Loading)
-    val state = _state.asStateFlow()
+/** Activity filter tabs (spec §7). */
+enum class ActivityFilter(val label: String) {
+    ALL("All"),
+    INCOME("Income"),
+    SPENDING("Spending"),
+    INTERNAL("Internal transfers"),
+    DIRECT_DEBITS("Direct Debits"),
+    TRANSFERS("Transfers"),
+    REFUNDS("Refunds"),
+}
+
+class TransactionsViewModel(
+    private val repo: TransactionRepository,
+    private val dashboardRepository: DashboardRepository,
+) : ViewModel() {
+    private val all = MutableStateFlow<Async<List<TransactionSummary>>>(Async.Loading)
+
+    val filter = MutableStateFlow(ActivityFilter.ALL)
+    val query = MutableStateFlow("")
+    val accounts = MutableStateFlow<List<AccountSummary>>(emptyList())
+    val selected = MutableStateFlow<TransactionSummary?>(null)
+
+    /** The list after applying the active filter tab and the search query. */
+    val state: StateFlow<Async<List<TransactionSummary>>> =
+        combine(all, filter, query) { a, f, q ->
+            when (a) {
+                is Async.Success -> Async.Success(a.data.filter { matches(it, f) && searchMatches(it, q) })
+                is Async.Loading -> Async.Loading
+                is Async.Failure -> a
+            }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, Async.Loading)
+
     init { refresh() }
+
     fun refresh() = viewModelScope.launch {
-        _state.value = Async.Loading
-        _state.value = runCatching { repo.recent(100) }.fold({ Async.Success(it) }, { Async.Failure(errorText(it)) })
+        all.value = Async.Loading
+        all.value = runCatching { repo.recent(200) }.fold({ Async.Success(it) }, { Async.Failure(errorText(it)) })
+        runCatching { dashboardRepository.load().accounts }.onSuccess { accounts.value = it }
+    }
+
+    fun setFilter(f: ActivityFilter) { filter.value = f }
+    fun setQuery(q: String) { query.value = q }
+    fun open(t: TransactionSummary) { selected.value = t }
+    fun close() { selected.value = null }
+
+    /** Mark (or undo) "this is a transfer between my accounts", then refresh totals. */
+    fun setInternalTransfer(id: String, internal: Boolean, counterpartyAccountId: String? = null) = viewModelScope.launch {
+        runCatching { repo.setInternalTransfer(id, internal, counterpartyAccountId) }.onSuccess { applyUpdate(it) }
+    }
+
+    fun setType(id: String, type: String) = viewModelScope.launch {
+        runCatching { repo.setType(id, type) }.onSuccess { applyUpdate(it) }
+    }
+
+    private fun applyUpdate(updated: TransactionSummary) {
+        val current = all.value
+        if (current is Async.Success) {
+            all.value = Async.Success(current.data.map { if (it.id == updated.id) updated else it })
+        }
+        if (selected.value?.id == updated.id) selected.value = updated
+        RefreshSignal.trigger() // dashboard income/spending totals may have changed
+    }
+
+    private fun matches(t: TransactionSummary, f: ActivityFilter): Boolean = when (f) {
+        ActivityFilter.ALL -> true
+        ActivityFilter.INCOME -> t.direction == "INCOME" && !t.isInternalTransfer
+        ActivityFilter.SPENDING -> t.direction == "EXPENSE" && !t.isInternalTransfer
+        ActivityFilter.INTERNAL -> t.isInternalTransfer
+        ActivityFilter.DIRECT_DEBITS -> t.transactionType == "DIRECT_DEBIT" || t.transactionType == "STANDING_ORDER"
+        ActivityFilter.TRANSFERS -> t.transactionType == "TRANSFER" || t.isInternalTransfer || t.direction == "TRANSFER"
+        ActivityFilter.REFUNDS -> t.transactionType == "REFUND" || t.status == "REFUNDED"
+    }
+
+    private fun searchMatches(t: TransactionSummary, q: String): Boolean {
+        val needle = q.trim().lowercase()
+        if (needle.isEmpty()) return true
+        val haystack = listOfNotNull(
+            t.description, t.merchant, t.senderName, t.recipientName, t.senderBankName, t.recipientBankName,
+            t.account, t.category, t.paymentReference, t.notes,
+            "%.2f".format(t.amountMinor / 100.0), t.amountMinor.toString(),
+        ).joinToString(" ").lowercase()
+        return haystack.contains(needle)
     }
 }
 

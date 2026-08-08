@@ -47,6 +47,10 @@ abstract class BaseBankAdapter(override val packages: Set<String>) : BankParserA
             sourcePackage = input.sourcePackage,
             confidence = confidence,
             redactedSourceText = Redaction.redact(text),
+            recipientName = if (direction == TransactionDirection.EXPENSE) TransferParsing.recipient(text) else null,
+            senderName = if (direction == TransactionDirection.INCOME) TransferParsing.sender(text) else null,
+            paymentReference = TransferParsing.reference(text),
+            paymentReason = TransferParsing.reason(text),
         )
     }
 }

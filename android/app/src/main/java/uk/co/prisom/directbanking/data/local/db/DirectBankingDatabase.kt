@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PendingSyncOpEntity::class,
         ApprovedSourceEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class DirectBankingDatabase : RoomDatabase() {
@@ -41,7 +41,18 @@ abstract class DirectBankingDatabase : RoomDatabase() {
             }
         }
 
-        val ALL_MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3)
+        /** v4 adds Phase 1 enrichment columns to parsed_import so counterparties,
+         *  reference and reason survive the Review flow (additive). */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `parsed_import` ADD COLUMN `senderName` TEXT")
+                db.execSQL("ALTER TABLE `parsed_import` ADD COLUMN `recipientName` TEXT")
+                db.execSQL("ALTER TABLE `parsed_import` ADD COLUMN `paymentReference` TEXT")
+                db.execSQL("ALTER TABLE `parsed_import` ADD COLUMN `paymentReason` TEXT")
+            }
+        }
+
+        val ALL_MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
 
         fun build(context: Context): DirectBankingDatabase =
             Room.databaseBuilder(context, DirectBankingDatabase::class.java, "directbanking.db")
