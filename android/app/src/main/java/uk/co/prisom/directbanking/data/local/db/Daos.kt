@@ -134,3 +134,18 @@ interface SourceDao {
     @Query("DELETE FROM approved_source")
     suspend fun clear()
 }
+
+@Dao
+interface UpcomingDao {
+    @Query("SELECT * FROM upcoming_payment_cache ORDER BY expectedDate")
+    fun observe(): Flow<List<UpcomingPaymentEntity>>
+
+    @Query("SELECT * FROM upcoming_payment_cache ORDER BY expectedDate")
+    suspend fun all(): List<UpcomingPaymentEntity>
+
+    @Upsert
+    suspend fun upsertAll(items: List<UpcomingPaymentEntity>)
+
+    @Query("DELETE FROM upcoming_payment_cache")
+    suspend fun clear()
+}

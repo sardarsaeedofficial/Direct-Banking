@@ -20,9 +20,16 @@ import { asyncHandler, HttpError } from "../middleware/error.js";
 import { authLimiter } from "../middleware/rateLimit.js";
 import { createTransaction, defaultTypeFor } from "../services/transactions.service.js";
 import { detectAndPairInternalTransfer } from "../services/internal-transfer.service.js";
+import {
+  detectDirectDebit,
+  effectiveExpectation,
+  getUpcomingPayments,
+  normaliseCompany,
+  recomputeMandate,
+} from "../services/direct-debit.service.js";
 import { getDashboard } from "../services/dashboard.service.js";
 import { registerUser } from "../services/users.service.js";
-import { txnCorrectionSchema } from "@direct-banking/shared";
+import { txnCorrectionSchema, ddUpdateSchema, ddMergeSchema } from "@direct-banking/shared";
 
 export const mobileRouter = Router();
 
@@ -148,6 +155,13 @@ mobileRouter.get(
         totalBalanceMinor: dashboard.totalBalanceMinor,
         remainingDirectDebitsMinor: dashboard.remainingDirectDebitsMinor,
         upcoming: dashboard.upcoming,
+        // Phase 2 Direct Debit analytics.
+        directDebitsThisMonthMinor: dashboard.directDebitsThisMonthMinor,
+        directDebitsThisYearMinor: dashboard.directDebitsThisYearMinor,
+        avgMonthlyDirectDebitMinor: dashboard.avgMonthlyDirectDebitMinor,
+        upcoming7DaysMinor: dashboard.upcoming7DaysMinor,
+        upcoming30DaysMinor: dashboard.upcoming30DaysMinor,
+        upcomingPayments: dashboard.upcomingPayments,
       },
       pendingImports,
       serverTime: new Date().toISOString(),
@@ -234,12 +248,215 @@ mobileRouter.patch(
       data.internalTransferConfidence = "NOT_INTERNAL";
     }
 
+    // Direct Debit corrections: mark/unmark, or (re)assign to a named company.
+    const mandatesToRecompute = new Set<string>();
+    if (body.markDirectDebit === false) {
+      if (txn.directDebitMandateId) mandatesToRecompute.add(txn.directDebitMandateId);
+      data.directDebitMandateId = null;
+      data.recurringKind = null;
+      data.ddAnomaly = null;
+      if (data.transactionType === undefined || txn.transactionType === "DIRECT_DEBIT") {
+        data.transactionType = body.transactionType ?? defaultTypeFor(txn.direction);
+      }
+    } else if (body.markDirectDebit === true || (body.directDebitCompany != null && body.directDebitCompany !== "")) {
+      if (txn.direction !== "EXPENSE") throw new HttpError(400, "Only outgoing payments can be Direct Debits");
+      const companyName = (body.directDebitCompany ?? txn.merchantName ?? txn.description).trim();
+      const normalized = normaliseCompany(companyName);
+      if (!normalized) throw new HttpError(400, "A company name is required to mark a Direct Debit");
+      const mandate = await prisma.directDebitMandate.upsert({
+        where: { userId_accountId_normalizedCompanyName: { userId, accountId: txn.accountId, normalizedCompanyName: normalized } },
+        update: {},
+        create: { userId, accountId: txn.accountId, companyName, normalizedCompanyName: normalized, kind: "DIRECT_DEBIT", status: "ACTIVE", firstSeenAt: txn.bookedAt },
+      });
+      if (txn.directDebitMandateId && txn.directDebitMandateId !== mandate.id) mandatesToRecompute.add(txn.directDebitMandateId);
+      mandatesToRecompute.add(mandate.id);
+      data.transactionType = "DIRECT_DEBIT";
+      data.directDebitMandateId = mandate.id;
+      data.recurringKind = "DIRECT_DEBIT";
+    }
+
     const updated = await prisma.transaction.update({
       where: { id: txn.id },
       data,
       include: { merchant: true, category: true, account: true },
     });
+    // Recompute any mandate whose payment set changed (balance-safe: no money moved).
+    for (const mid of mandatesToRecompute) await recomputeMandate(userId, mid);
     res.json({ transaction: updated });
+  }),
+);
+
+// ── Direct Debits (Phase 2) ─────────────────────────────────────────────────
+
+/** Serialise a mandate with its effective (user-override-aware) expectation. */
+function publicMandate(m: Record<string, unknown>) {
+  const e = effectiveExpectation(m as never);
+  return {
+    ...m,
+    firstSeenAt: (m.firstSeenAt as Date | null)?.toISOString?.() ?? m.firstSeenAt,
+    lastPaidAt: (m.lastPaidAt as Date | null)?.toISOString?.() ?? null,
+    nextExpectedAt: (m.nextExpectedAt as Date | null)?.toISOString?.() ?? null,
+    expectedNextDate: (m.expectedNextDate as Date | null)?.toISOString?.() ?? null,
+    userExpectedDate: (m.userExpectedDate as Date | null)?.toISOString?.() ?? null,
+    createdAt: (m.createdAt as Date | null)?.toISOString?.() ?? m.createdAt,
+    updatedAt: (m.updatedAt as Date | null)?.toISOString?.() ?? m.updatedAt,
+    effectiveAmountMinor: e.point,
+    effectiveMinMinor: e.min,
+    effectiveMaxMinor: e.max,
+  };
+}
+
+mobileRouter.get(
+  "/direct-debits",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+    const search = typeof req.query.search === "string" ? req.query.search.trim() : undefined;
+    const sort = typeof req.query.sort === "string" ? req.query.sort : "next";
+    const items = await prisma.directDebitMandate.findMany({
+      where: {
+        userId,
+        status: status as never,
+        ...(search ? { companyName: { contains: search, mode: "insensitive" } } : {}),
+      },
+      include: { account: { select: { nickname: true, bankName: true } } },
+    });
+    const mapped = items.map(publicMandate);
+    const sorters: Record<string, (a: any, b: any) => number> = {
+      next: (a, b) => (a.nextExpectedAt ?? "9999").localeCompare(b.nextExpectedAt ?? "9999"),
+      company: (a, b) => String(a.companyName).localeCompare(String(b.companyName)),
+      amount: (a, b) => (b.effectiveAmountMinor ?? 0) - (a.effectiveAmountMinor ?? 0),
+    };
+    mapped.sort(sorters[sort] ?? sorters.next);
+    res.json({ items: mapped });
+  }),
+);
+
+mobileRouter.get(
+  "/upcoming-payments",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const days = Math.min(Math.max(Number(req.query.days) || 7, 1), 90);
+    const result = await getUpcomingPayments(req.mobileAuth!.userId, days);
+    res.json(result);
+  }),
+);
+
+async function mandateOr404(userId: string, id: string) {
+  const m = await prisma.directDebitMandate.findFirst({ where: { id, userId }, include: { account: { select: { nickname: true, bankName: true } } } });
+  if (!m) throw new HttpError(404, "Direct Debit not found");
+  return m;
+}
+
+mobileRouter.get(
+  "/direct-debits/:id",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const m = await mandateOr404(userId, req.params.id);
+    const payments = await prisma.transaction.findMany({
+      where: { userId, directDebitMandateId: m.id, direction: "EXPENSE", status: { in: ["COMPLETED", "PENDING"] } },
+      select: { amountMinor: true, bookedAt: true },
+      orderBy: { bookedAt: "desc" },
+    });
+    const amounts = payments.map((p) => Number(p.amountMinor));
+    const now = new Date();
+    const yearStart = new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const sum = (from: Date) => payments.filter((p) => p.bookedAt >= from).reduce((s, p) => s + Number(p.amountMinor), 0);
+    const stats = {
+      paidThisMonthMinor: sum(monthStart),
+      paidThisYearMinor: sum(yearStart),
+      averageMinor: amounts.length ? Math.round(amounts.reduce((a, b) => a + b, 0) / amounts.length) : 0,
+      medianMinor: amounts.length ? [...amounts].sort((a, b) => a - b)[Math.floor(amounts.length / 2)]! : 0,
+      highestMinor: amounts.length ? Math.max(...amounts) : 0,
+      lowestMinor: amounts.length ? Math.min(...amounts) : 0,
+    };
+    res.json({ mandate: publicMandate(m), stats });
+  }),
+);
+
+mobileRouter.get(
+  "/direct-debits/:id/history",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    await mandateOr404(userId, req.params.id);
+    const payments = await prisma.transaction.findMany({
+      where: { userId, directDebitMandateId: req.params.id },
+      select: { id: true, amountMinor: true, currency: true, bookedAt: true, ddAnomaly: true, status: true, description: true },
+      orderBy: { bookedAt: "desc" },
+    });
+    res.json({ items: payments.map((p) => ({ ...p, amountMinor: Number(p.amountMinor) })) });
+  }),
+);
+
+mobileRouter.patch(
+  "/direct-debits/:id",
+  requireMobileAuth,
+  validate(ddUpdateSchema),
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const body = validated<typeof ddUpdateSchema>(res);
+    const existing = await prisma.directDebitMandate.findFirst({ where: { id: req.params.id, userId } });
+    if (!existing) throw new HttpError(404, "Direct Debit not found");
+    if (body.accountId) {
+      const acc = await prisma.bankAccount.findFirst({ where: { id: body.accountId, userId } });
+      if (!acc) throw new HttpError(404, "Account not found");
+    }
+
+    const data: Prisma.DirectDebitMandateUncheckedUpdateInput = {};
+    if (body.companyName !== undefined) {
+      data.companyName = body.companyName;
+      data.normalizedCompanyName = normaliseCompany(body.companyName);
+    }
+    if (body.accountId !== undefined) data.accountId = body.accountId;
+    if (body.status !== undefined) data.status = body.status;
+    if (body.frequency !== undefined) data.frequency = body.frequency;
+    if (body.expectationMode !== undefined) data.expectationMode = body.expectationMode;
+    if (body.alertDaysBefore !== undefined) data.alertDaysBefore = body.alertDaysBefore;
+    if (body.amountTolerancePercent !== undefined) data.amountTolerancePercent = body.amountTolerancePercent;
+    if (body.expectedDayOfMonth !== undefined) data.expectedDayOfMonth = body.expectedDayOfMonth;
+    if (body.notes !== undefined) data.notes = body.notes;
+    if (body.learnFromHistory !== undefined) data.learnFromHistory = body.learnFromHistory;
+    if (body.userExpectedDate !== undefined) {
+      data.userExpectedDate = body.userExpectedDate ? new Date(body.userExpectedDate) : null;
+      if (body.userExpectedDate) data.nextExpectedAt = new Date(body.userExpectedDate);
+    }
+    // User-configured amount/range takes precedence over learned predictions.
+    if (body.userExpectedAmountMinor !== undefined) {
+      data.userExpectedAmountMinor = body.userExpectedAmountMinor;
+      data.userConfiguredExpectedAmount = body.userExpectedAmountMinor != null;
+    }
+    if (body.userExpectedMinMinor !== undefined) data.userExpectedMinMinor = body.userExpectedMinMinor;
+    if (body.userExpectedMaxMinor !== undefined) data.userExpectedMaxMinor = body.userExpectedMaxMinor;
+
+    await prisma.directDebitMandate.update({ where: { id: existing.id }, data });
+    const refreshed = await mandateOr404(userId, existing.id);
+    res.json({ mandate: publicMandate(refreshed) });
+  }),
+);
+
+// Merge a duplicate company's payments into another mandate, then recompute.
+mobileRouter.post(
+  "/direct-debits/:id/merge",
+  requireMobileAuth,
+  validate(ddMergeSchema),
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const { intoMandateId } = validated<typeof ddMergeSchema>(res);
+    if (intoMandateId === req.params.id) throw new HttpError(400, "Cannot merge a mandate into itself");
+    const from = await prisma.directDebitMandate.findFirst({ where: { id: req.params.id, userId } });
+    const into = await prisma.directDebitMandate.findFirst({ where: { id: intoMandateId, userId } });
+    if (!from || !into) throw new HttpError(404, "Direct Debit not found");
+    await prisma.$transaction(async (tx) => {
+      await tx.transaction.updateMany({ where: { userId, directDebitMandateId: from.id }, data: { directDebitMandateId: into.id } });
+      await tx.directDebitMandate.delete({ where: { id: from.id } });
+      await recomputeMandate(userId, into.id, tx);
+    });
+    const refreshed = await mandateOr404(userId, into.id);
+    res.json({ mandate: publicMandate(refreshed) });
   }),
 );
 
@@ -359,7 +576,24 @@ mobileRouter.post(
           tx,
         );
         // Pair with the opposite side (own-account transfer) atomically within the import.
-        await detectAndPairInternalTransfer(userId, txn.id, tx);
+        const transferConfidence = await detectAndPairInternalTransfer(userId, txn.id, tx);
+        // Direct Debit detection — never on an internal transfer.
+        if (transferConfidence !== "CONFIRMED" && transferConfidence !== "HIGH") {
+          await detectDirectDebit(
+            userId,
+            txn.id,
+            {
+              merchant: c.merchant ?? c.title,
+              text: c.redactedSourceText,
+              amountMinor: c.amountMinor,
+              accountId: c.accountId,
+              bookedAt: new Date(c.occurredAt),
+              direction: c.direction,
+              reference: c.paymentReference,
+            },
+            tx,
+          );
+        }
         const finalTxn = await tx.transaction.findUnique({ where: { id: txn.id }, include: { merchant: true, category: true, account: true } });
         const updated = await tx.notificationImport.update({ where: { id: importRow.id }, data: { approvedTransactionId: txn.id } });
         return { import: updated, transaction: finalTxn };
@@ -473,7 +707,17 @@ mobileRouter.patch(
         notes: body.notes,
         sourceBankPackage: item.sourcePackage,
       });
-      await detectAndPairInternalTransfer(userId, txn.id);
+      const transferConfidence = await detectAndPairInternalTransfer(userId, txn.id);
+      if (transferConfidence !== "CONFIRMED" && transferConfidence !== "HIGH") {
+        await detectDirectDebit(userId, txn.id, {
+          merchant: merchant ?? item.parsedMerchant ?? item.title,
+          text: item.redactedText ?? item.message,
+          amountMinor,
+          accountId: body.accountId,
+          bookedAt: occurredAt,
+          direction,
+        });
+      }
       const finalTxn = await prisma.transaction.findUnique({ where: { id: txn.id }, include: { merchant: true, category: true, account: true } });
       const updated = await prisma.notificationImport.update({
         where: { id: item.id },

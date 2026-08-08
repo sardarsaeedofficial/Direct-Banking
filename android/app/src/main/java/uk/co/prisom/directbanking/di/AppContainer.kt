@@ -15,6 +15,7 @@ import uk.co.prisom.directbanking.notifications.AppNotifier
 import uk.co.prisom.directbanking.data.repository.AuthRepository
 import uk.co.prisom.directbanking.data.repository.AutoImportResult
 import uk.co.prisom.directbanking.data.repository.DashboardRepository
+import uk.co.prisom.directbanking.data.repository.DirectDebitRepository
 import uk.co.prisom.directbanking.data.repository.ImportRepository
 import uk.co.prisom.directbanking.data.repository.SourceRepository
 import uk.co.prisom.directbanking.data.repository.SyncRepository
@@ -37,6 +38,7 @@ class AppContainer(context: Context) {
     val authRepository = AuthRepository(apiClients, tokenStore, BuildConfig.VERSION_NAME)
     val dashboardRepository = DashboardRepository(authRepository)
     val transactionRepository = TransactionRepository(apiClients)
+    val directDebitRepository = DirectDebitRepository(apiClients, db.upcomingDao())
     val sourceRepository = SourceRepository(db.sourceDao())
     val importRepository = ImportRepository(
         db.importDao(), db.syncDao(), db.sourceDao(), db.capturedDao(), tokenStore, ParserRegistry(), json,

@@ -72,3 +72,18 @@ data class ApprovedSourceEntity(
     val defaultAccountId: String? = null, // Direct Banking account this source maps to
     val isBuiltInTrusted: Boolean = false,
 )
+
+/**
+ * Phase 2 offline cache of upcoming Direct Debit payments so the Home screen can
+ * render without a network round-trip. The backend remains the canonical source;
+ * this is refreshed write-through whenever upcoming payments are fetched.
+ */
+@Entity(tableName = "upcoming_payment_cache")
+data class UpcomingPaymentEntity(
+    @PrimaryKey val mandateId: String,
+    val companyName: String,
+    val account: String,
+    val expectedDate: String?, // ISO-8601
+    val expectedAmountMinor: Long,
+    val cachedAtMillis: Long,
+)

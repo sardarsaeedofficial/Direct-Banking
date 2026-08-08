@@ -12,6 +12,9 @@ import {
   TXN_SOURCES,
   TXN_STATUSES,
   TXN_TYPES,
+  DD_STATUSES,
+  DD_FREQUENCIES,
+  DD_EXPECTATION_MODES,
 } from "./enums.js";
 
 // Reusable primitives -------------------------------------------------------
@@ -292,6 +295,39 @@ export const txnCorrectionSchema = z
     markInternalTransfer: z.boolean().optional(),
     // The user's own account on the other side of a single-sided transfer.
     counterpartyAccountId: cuid.optional().nullable(),
+    // Phase 2 — Direct Debit corrections.
+    // true marks this transaction as a Direct Debit (assigning it to a company
+    // mandate); false unmarks it. `directDebitCompany` assigns/moves it to a named
+    // company (creating the mandate if needed) — used to split incorrectly merged
+    // companies or re-assign a payment.
+    markDirectDebit: z.boolean().optional(),
+    directDebitCompany: z.string().max(160).optional().nullable(),
   })
   .refine((v) => Object.keys(v).length > 0, { message: "No changes supplied" });
 export type TxnCorrectionInput = z.infer<typeof txnCorrectionSchema>;
+
+// Phase 2 — edit a Direct Debit mandate. User overrides take precedence over
+// learned predictions; every field is optional.
+export const ddUpdateSchema = z
+  .object({
+    companyName: z.string().min(1).max(160).optional(),
+    accountId: cuid.optional(),
+    status: z.enum(DD_STATUSES).optional(),
+    frequency: z.enum(DD_FREQUENCIES).optional(),
+    expectationMode: z.enum(DD_EXPECTATION_MODES).optional(),
+    userExpectedAmountMinor: minorAmount.positive().optional().nullable(),
+    userExpectedMinMinor: minorAmount.positive().optional().nullable(),
+    userExpectedMaxMinor: minorAmount.positive().optional().nullable(),
+    userExpectedDate: isoDate.optional().nullable(),
+    expectedDayOfMonth: z.number().int().min(1).max(31).optional().nullable(),
+    alertDaysBefore: z.number().int().min(0).max(31).optional(),
+    amountTolerancePercent: z.number().int().min(0).max(100).optional(),
+    learnFromHistory: z.boolean().optional(),
+    notes: z.string().max(2000).optional().nullable(),
+  })
+  .refine((v) => Object.keys(v).length > 0, { message: "No changes supplied" });
+export type DdUpdateInput = z.infer<typeof ddUpdateSchema>;
+
+// Merge one mandate's history into another (fix a duplicated company).
+export const ddMergeSchema = z.object({ intoMandateId: cuid });
+export type DdMergeInput = z.infer<typeof ddMergeSchema>;

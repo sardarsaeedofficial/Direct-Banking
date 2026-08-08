@@ -94,9 +94,40 @@ fun DashboardScreen(
                 }
                 Spacer(Modifier.height(12.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    StatCard("Upcoming direct debits", money(d.summary.remainingDirectDebitsMinor, cur), Modifier.weight(1f))
-                    StatCard("Pending imports", pending.toString(), Modifier.weight(1f))
+                    StatCard("Direct Debits this month", money(d.summary.directDebitsThisMonthMinor, cur), Modifier.weight(1f))
+                    StatCard("Upcoming next 30 days", money(d.summary.upcoming30DaysMinor, cur), Modifier.weight(1f))
                 }
+
+                // Upcoming payments (next 7 days) — the prominent Phase 2 Home section.
+                if (d.upcomingPayments.isNotEmpty()) {
+                    Spacer(Modifier.height(16.dp))
+                    Text("Upcoming payments", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text("Next 7 days", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(8.dp))
+                    Card(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                            d.upcomingPayments.forEach { p ->
+                                Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(p.companyName, style = MaterialTheme.typography.bodyLarge)
+                                        Text(
+                                            listOfNotNull(p.expectedDate?.take(10), p.account).joinToString(" · "),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    Text((if (p.isRange) "~" else "") + money(p.expectedAmountMinor, cur), fontWeight = FontWeight.SemiBold)
+                                }
+                                HorizontalDivider()
+                            }
+                            Row(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
+                                Text("Expected next 7 days", Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(money(d.summary.upcoming7DaysMinor, cur), fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+
                 Spacer(Modifier.height(16.dp))
                 Text(
                     "Last sync: " + if (lastSync > 0) DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(lastSync)) else "never",
@@ -143,32 +174,6 @@ private fun AccountRow(a: AccountSummary) {
                 Text(listOfNotNull(a.bankName, a.lastFour?.let { "•••• $it" }).joinToString(" "), style = MaterialTheme.typography.bodySmall)
             }
             Text(money(a.balanceMinor, a.currency), fontWeight = FontWeight.SemiBold)
-        }
-        HorizontalDivider()
-    }
-}
-
-@Composable
-fun DirectDebitsScreen(vm: OverviewViewModel) {
-    val state by vm.state.collectAsStateWithLifecycle()
-    when (val s = state) {
-        is Async.Loading -> LoadingBox()
-        is Async.Failure -> MessageBox(s.message)
-        is Async.Success -> if (s.data.directDebits.isEmpty()) EmptyState("No upcoming direct debits.") else LazyColumn(Modifier.fillMaxSize()) {
-            items(s.data.directDebits, key = { it.id }) { DirectDebitRow(it) }
-        }
-    }
-}
-
-@Composable
-private fun DirectDebitRow(dd: DirectDebitSummary) {
-    Column {
-        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(dd.merchantName, style = MaterialTheme.typography.titleMedium)
-                dd.nextDueDate?.let { Text("Due ${it.take(10)}", style = MaterialTheme.typography.bodySmall) }
-            }
-            Text(money(dd.expectedAmountMinor, dd.currency), fontWeight = FontWeight.SemiBold)
         }
         HorizontalDivider()
     }

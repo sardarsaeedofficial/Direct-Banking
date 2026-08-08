@@ -89,6 +89,35 @@ class RoomMigrationTest {
         return FrameworkSQLiteOpenHelperFactory().create(config).writableDatabase
     }
 
+    /** Opens a minimal v4 database (the 4→5 migration adds a brand-new table). */
+    private fun openV4(name: String): SupportSQLiteDatabase {
+        context.deleteDatabase(name)
+        val config = SupportSQLiteOpenHelper.Configuration.builder(context)
+            .name(name)
+            .callback(object : SupportSQLiteOpenHelper.Callback(4) {
+                override fun onCreate(db: SupportSQLiteDatabase) {
+                    db.execSQL("CREATE TABLE `placeholder` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL)")
+                }
+                override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+            })
+            .build()
+        return FrameworkSQLiteOpenHelperFactory().create(config).writableDatabase
+    }
+
+    @Test
+    fun `migration 4 to 5 adds the upcoming-payment cache table`() {
+        val db = openV4("mig-test-4-5.db")
+        DirectBankingDatabase.MIGRATION_4_5.migrate(db)
+
+        db.execSQL("INSERT INTO upcoming_payment_cache VALUES ('m1','British Gas','Monzo','2026-08-15',8200,1000)")
+        db.query("SELECT companyName, expectedAmountMinor FROM upcoming_payment_cache WHERE mandateId='m1'").use { c ->
+            c.moveToFirst()
+            assertEquals("British Gas", c.getString(0))
+            assertEquals(8200, c.getInt(1))
+        }
+        db.close()
+    }
+
     @Test
     fun `migration 1 to 2 adds ignored column and preserves data`() {
         val db = openV1("mig-test.db")

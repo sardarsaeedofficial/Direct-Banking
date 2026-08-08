@@ -20,7 +20,12 @@ import uk.co.prisom.directbanking.data.local.db.DirectBankingDatabase
 import uk.co.prisom.directbanking.data.local.db.ParsedImportEntity
 import uk.co.prisom.directbanking.data.local.db.SourceWithCount
 import uk.co.prisom.directbanking.data.repository.AuthRepository
+import uk.co.prisom.directbanking.data.remote.dto.DdHistoryItemDto
+import uk.co.prisom.directbanking.data.remote.dto.DdStatsDto
+import uk.co.prisom.directbanking.data.remote.dto.DdUpdateRequest
+import uk.co.prisom.directbanking.data.remote.dto.DirectDebitMandateDto
 import uk.co.prisom.directbanking.data.repository.DashboardRepository
+import uk.co.prisom.directbanking.data.repository.DirectDebitRepository
 import uk.co.prisom.directbanking.data.repository.ImportRepository
 import uk.co.prisom.directbanking.data.repository.SourceRepository
 import uk.co.prisom.directbanking.data.repository.SyncRepository
@@ -283,5 +288,66 @@ class SettingsViewModel(
     fun revokeThisDevice(onDone: () -> Unit) = viewModelScope.launch {
         auth.logout(allDevices = false)
         onDone()
+    }
+}
+
+/** Direct Debits overview tabs (spec §12). */
+enum class DdTab(val label: String) { ACTIVE("Active"), UPCOMING("Upcoming"), ATTENTION("Attention"), CANCELLED("Cancelled") }
+enum class DdSort(val label: String, val api: String) { NEXT("Next payment", "next"), COMPANY("Company", "company"), AMOUNT("Amount", "amount") }
+
+class DirectDebitsViewModel(private val repo: DirectDebitRepository) : ViewModel() {
+    private val all = MutableStateFlow<Async<List<DirectDebitMandateDto>>>(Async.Loading)
+    val tab = MutableStateFlow(DdTab.ACTIVE)
+    val query = MutableStateFlow("")
+    val sort = MutableStateFlow(DdSort.NEXT)
+
+    val state: StateFlow<Async<List<DirectDebitMandateDto>>> =
+        combine(all, tab, query) { a, t, q ->
+            when (a) {
+                is Async.Success -> Async.Success(a.data.filter { matches(it, t) && searchMatches(it, q) })
+                is Async.Loading -> Async.Loading
+                is Async.Failure -> a
+            }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, Async.Loading)
+
+    init { refresh() }
+
+    fun refresh() = viewModelScope.launch {
+        all.value = Async.Loading
+        all.value = runCatching { repo.list(sort = sort.value.api) }.fold({ Async.Success(it) }, { Async.Failure(errorText(it)) })
+    }
+    fun setTab(t: DdTab) { tab.value = t }
+    fun setQuery(q: String) { query.value = q }
+    fun setSort(s: DdSort) { sort.value = s; refresh() }
+
+    private fun matches(m: DirectDebitMandateDto, t: DdTab): Boolean = when (t) {
+        DdTab.ACTIVE -> m.status == "ACTIVE"
+        DdTab.UPCOMING -> m.status == "ACTIVE" && m.nextExpectedAt != null
+        DdTab.ATTENTION -> m.status == "UNKNOWN" || m.status == "PAUSED"
+        DdTab.CANCELLED -> m.status == "CANCELLED"
+    }
+    private fun searchMatches(m: DirectDebitMandateDto, q: String): Boolean {
+        val needle = q.trim().lowercase()
+        return needle.isEmpty() || m.companyName.lowercase().contains(needle)
+    }
+}
+
+data class DdDetail(val mandate: DirectDebitMandateDto, val stats: DdStatsDto, val history: List<DdHistoryItemDto>)
+
+class DirectDebitDetailViewModel(private val repo: DirectDebitRepository, private val mandateId: String) : ViewModel() {
+    private val _state = MutableStateFlow<Async<DdDetail>>(Async.Loading)
+    val state = _state.asStateFlow()
+    init { load() }
+    fun load() = viewModelScope.launch {
+        _state.value = Async.Loading
+        _state.value = runCatching {
+            val detail = repo.detail(mandateId)
+            val history = repo.history(mandateId)
+            DdDetail(detail.mandate, detail.stats, history)
+        }.fold({ Async.Success(it) }, { Async.Failure(errorText(it)) })
+    }
+    fun update(body: DdUpdateRequest) = viewModelScope.launch {
+        runCatching { repo.update(mandateId, body) }.onSuccess { load() }
+        RefreshSignal.trigger()
     }
 }

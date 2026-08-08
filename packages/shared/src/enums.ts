@@ -32,6 +32,22 @@ export type TxnType = (typeof TXN_TYPES)[number];
 export const TRANSFER_CONFIDENCES = ["CONFIRMED", "HIGH", "POSSIBLE", "NOT_INTERNAL"] as const;
 export type TransferConfidence = (typeof TRANSFER_CONFIDENCES)[number];
 
+// Phase 2 — Direct Debit engine.
+export const DD_STATUSES = ["ACTIVE", "PAUSED", "CANCELLED", "UNKNOWN"] as const;
+export type DdStatus = (typeof DD_STATUSES)[number];
+
+export const DD_FREQUENCIES = ["WEEKLY", "FORTNIGHTLY", "MONTHLY", "QUARTERLY", "YEARLY", "VARIABLE"] as const;
+export type DdFrequency = (typeof DD_FREQUENCIES)[number];
+
+export const DD_EXPECTATION_MODES = ["FIXED", "RANGE", "LEARNED"] as const;
+export type DdExpectationMode = (typeof DD_EXPECTATION_MODES)[number];
+
+export const DD_ANOMALIES = ["NORMAL", "ABOVE_EXPECTED", "BELOW_EXPECTED", "UNEXPECTED_DATE", "FIRST_PAYMENT", "UNKNOWN"] as const;
+export type DdAnomaly = (typeof DD_ANOMALIES)[number];
+
+export const RECURRING_KINDS = ["DIRECT_DEBIT", "STANDING_ORDER", "SUBSCRIPTION", "RECURRING_CARD"] as const;
+export type RecurringKind = (typeof RECURRING_KINDS)[number];
+
 export const RECURRING_TYPES = [
   "DIRECT_DEBIT",
   "STANDING_ORDER",
