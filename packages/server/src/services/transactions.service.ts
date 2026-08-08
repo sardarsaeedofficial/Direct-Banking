@@ -1,4 +1,4 @@
-import type { Prisma, TxnDirection, TxnStatus, TxnSource } from "@prisma/client";
+import type { Prisma, TxnDirection, TxnStatus, TxnSource, TxnType } from "@prisma/client";
 import { prisma } from "../db.js";
 import { linkMerchant } from "./merchant-normalise.service.js";
 import { dedupeHash } from "./duplicate-detection.service.js";
@@ -20,6 +20,23 @@ export interface CreateTxnInput {
   transferAccountId?: string | null;
   refundOfId?: string | null;
   importBatchId?: string | null;
+  // ---- Phase 1: rich ledger fields (all optional) ----
+  transactionType?: TxnType | null;
+  senderName?: string | null;
+  senderBankName?: string | null;
+  recipientName?: string | null;
+  recipientBankName?: string | null;
+  paymentReference?: string | null;
+  paymentReason?: string | null;
+  sourceBankPackage?: string | null;
+  occurredAt?: Date | null;
+}
+
+/** Canonical ledger type implied by a coarse direction when none is supplied. */
+export function defaultTypeFor(direction: TxnDirection): TxnType {
+  if (direction === "INCOME") return "INCOME";
+  if (direction === "TRANSFER") return "TRANSFER";
+  return "PURCHASE";
 }
 
 /**
@@ -97,6 +114,17 @@ export async function createTransaction(userId: string, input: CreateTxnInput, c
     dedupeHash: hash,
     // Newly-created transactions always maintain the balance (unless cancelled).
     balanceApplied: (input.status ?? "COMPLETED") !== "CANCELLED",
+    // ---- Phase 1 rich ledger fields ----
+    transactionType: input.transactionType ?? defaultTypeFor(input.direction),
+    merchantName: input.merchantName ?? undefined,
+    senderName: input.senderName ?? undefined,
+    senderBankName: input.senderBankName ?? undefined,
+    recipientName: input.recipientName ?? undefined,
+    recipientBankName: input.recipientBankName ?? undefined,
+    paymentReference: input.paymentReference ?? undefined,
+    paymentReason: input.paymentReason ?? undefined,
+    sourceBankPackage: input.sourceBankPackage ?? undefined,
+    occurredAt: input.occurredAt ?? undefined,
   };
 
   // Single source of truth: BankAccount.balanceMinor is the current balance and

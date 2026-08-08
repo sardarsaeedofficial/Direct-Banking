@@ -20,4 +20,9 @@ data class ParsedTransactionCandidate(
     val sourcePackage: String,
     val confidence: Double,
     val redactedSourceText: String,
+    // ---- Phase 1 enrichment (all optional; extracted only when present) ----
+    val senderName: String? = null,
+    val recipientName: String? = null,
+    val paymentReference: String? = null,
+    val paymentReason: String? = null,
 )

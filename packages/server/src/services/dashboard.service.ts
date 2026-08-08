@@ -19,6 +19,7 @@ export async function getDashboard(userId: string, now = new Date()) {
     where: { userId, parentId: null, status: { in: ["COMPLETED", "PENDING"] }, bookedAt: { gte: monthStart, lt: monthEnd } },
     select: {
       direction: true,
+      transactionType: true,
       amountMinor: true,
       accountId: true,
       categoryId: true,
@@ -32,6 +33,9 @@ export async function getDashboard(userId: string, now = new Date()) {
   const byCategory = new Map<string, { name: string; colour: string; amountMinor: number }>();
   const byAccount = new Map<string, { name: string; colour: string; amountMinor: number }>();
   for (const t of monthTxns) {
+    // Confirmed internal transfers are movements between the user's own accounts:
+    // they are not real income or spending, so they never affect these totals.
+    if (t.transactionType === "INTERNAL_TRANSFER") continue;
     if (t.direction === "INCOME") incomeMinor += t.amountMinor;
     else if (t.direction === "EXPENSE") {
       expenseMinor += t.amountMinor;
@@ -72,11 +76,12 @@ export async function getDashboard(userId: string, now = new Date()) {
   // 12-month and 5-year charts.
   const longTxns = await prisma.transaction.findMany({
     where: { userId, parentId: null, status: { in: ["COMPLETED", "PENDING"] }, bookedAt: { gte: fiveYearsAgo } },
-    select: { direction: true, amountMinor: true, bookedAt: true },
+    select: { direction: true, transactionType: true, amountMinor: true, bookedAt: true },
   });
   const monthly = new Map<string, { incomeMinor: number; expenseMinor: number }>();
   const yearly = new Map<number, { incomeMinor: number; expenseMinor: number }>();
   for (const t of longTxns) {
+    if (t.transactionType === "INTERNAL_TRANSFER") continue; // exclude own-account transfers
     const amt = Number(t.amountMinor);
     if (t.bookedAt >= twelveMonthsAgo) {
       const k = monthKey(t.bookedAt);

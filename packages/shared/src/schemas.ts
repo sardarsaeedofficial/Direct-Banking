@@ -11,6 +11,7 @@ import {
   TXN_DIRECTIONS,
   TXN_SOURCES,
   TXN_STATUSES,
+  TXN_TYPES,
 } from "./enums.js";
 
 // Reusable primitives -------------------------------------------------------
@@ -233,6 +234,13 @@ export const notifImportCreateSchema = z.object({
   confidence: z.number().min(0).max(1),
   redactedSourceText: z.string().max(2000).default(""),
   title: z.string().max(240).default(""),
+  // ---- Phase 1: optional enrichment (never required) ----
+  senderName: z.string().max(160).optional().nullable(),
+  recipientName: z.string().max(160).optional().nullable(),
+  senderBankName: z.string().max(120).optional().nullable(),
+  recipientBankName: z.string().max(120).optional().nullable(),
+  paymentReference: z.string().max(200).optional().nullable(),
+  paymentReason: z.string().max(200).optional().nullable(),
 });
 export type NotifImportCreateInput = z.infer<typeof notifImportCreateSchema>;
 
@@ -262,3 +270,28 @@ export const notifImportQuerySchema = z.object({
   status: z.enum(NOTIF_STATUSES).optional(),
   reviewState: z.enum(["DRAFT", "REVIEW_REQUIRED", "UNRECOGNISED"]).optional(),
 });
+
+// Phase 1 — manual correction of a ledger transaction from the mobile client.
+// Every field is optional; only supplied fields change. Marking a transaction as
+// an internal transfer (or undoing it) recalculates dashboard totals safely and
+// never double-applies the balance.
+export const txnCorrectionSchema = z
+  .object({
+    transactionType: z.enum(TXN_TYPES).optional(),
+    categoryId: cuid.optional().nullable(),
+    subcategory: z.string().max(80).optional().nullable(),
+    senderName: z.string().max(160).optional().nullable(),
+    senderBankName: z.string().max(120).optional().nullable(),
+    recipientName: z.string().max(160).optional().nullable(),
+    recipientBankName: z.string().max(120).optional().nullable(),
+    notes: z.string().max(2000).optional().nullable(),
+    paymentReason: z.string().max(200).optional().nullable(),
+    paymentReference: z.string().max(200).optional().nullable(),
+    // Internal-transfer control: true marks this as a confirmed internal transfer,
+    // false restores its normal income/spending classification.
+    markInternalTransfer: z.boolean().optional(),
+    // The user's own account on the other side of a single-sided transfer.
+    counterpartyAccountId: cuid.optional().nullable(),
+  })
+  .refine((v) => Object.keys(v).length > 0, { message: "No changes supplied" });
+export type TxnCorrectionInput = z.infer<typeof txnCorrectionSchema>;

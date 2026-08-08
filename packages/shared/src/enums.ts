@@ -10,8 +10,27 @@ export type TxnDirection = (typeof TXN_DIRECTIONS)[number];
 export const TXN_STATUSES = ["PENDING", "COMPLETED", "REFUNDED", "CANCELLED"] as const;
 export type TxnStatus = (typeof TXN_STATUSES)[number];
 
-export const TXN_SOURCES = ["MANUAL", "CSV_IMPORT", "NOTIFICATION", "OPEN_BANKING"] as const;
+export const TXN_SOURCES = ["MANUAL", "CSV_IMPORT", "NOTIFICATION", "OPEN_BANKING", "STATEMENT_IMPORT"] as const;
 export type TxnSource = (typeof TXN_SOURCES)[number];
+
+// Canonical ledger classification (Phase 1).
+export const TXN_TYPES = [
+  "INCOME",
+  "PURCHASE",
+  "INTERNAL_TRANSFER",
+  "DIRECT_DEBIT",
+  "STANDING_ORDER",
+  "CASH_WITHDRAWAL",
+  "BANK_FEE",
+  "REFUND",
+  "TRANSFER",
+  "OTHER",
+] as const;
+export type TxnType = (typeof TXN_TYPES)[number];
+
+// Strength of an internal-transfer match. Only CONFIRMED/HIGH auto-classify.
+export const TRANSFER_CONFIDENCES = ["CONFIRMED", "HIGH", "POSSIBLE", "NOT_INTERNAL"] as const;
+export type TransferConfidence = (typeof TRANSFER_CONFIDENCES)[number];
 
 export const RECURRING_TYPES = [
   "DIRECT_DEBIT",

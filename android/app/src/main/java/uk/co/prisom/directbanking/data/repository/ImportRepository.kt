@@ -280,6 +280,8 @@ class ImportRepository(
             occurredAtMillis = raw.postTime, confidence = c.confidence, reviewState = reviewStateFor(c.confidence),
             redactedText = c.redactedSourceText, title = c.merchant ?: sourceName, localStatus = localStatus,
             remoteId = null, createdAtMillis = clock(),
+            senderName = c.senderName, recipientName = c.recipientName,
+            paymentReference = c.paymentReference, paymentReason = c.paymentReason,
         )
 
     private fun autoRequest(fingerprint: String, c: uk.co.prisom.directbanking.parsing.ParsedTransactionCandidate, raw: RawNotification, accountId: String, sourceName: String) =
@@ -288,6 +290,8 @@ class ImportRepository(
             amountMinor = c.amountMinor, currency = c.currency, merchant = c.merchant, accountHint = c.accountHint,
             occurredAt = Instant.ofEpochMilli(raw.postTime).toString(), confidence = c.confidence,
             redactedSourceText = c.redactedSourceText, title = c.merchant ?: sourceName, accountId = accountId,
+            senderName = c.senderName, recipientName = c.recipientName,
+            paymentReference = c.paymentReference, paymentReason = c.paymentReason,
         )
 
     private suspend fun enqueueAuto(fingerprint: String, c: uk.co.prisom.directbanking.parsing.ParsedTransactionCandidate, raw: RawNotification, accountId: String, sourceName: String) {

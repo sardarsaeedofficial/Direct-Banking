@@ -22,6 +22,11 @@ data class ParsedImportEntity(
     val localStatus: String, // LOCAL | SYNCED | APPROVED | REJECTED
     val remoteId: String? = null,
     val createdAtMillis: Long,
+    // Phase 1 enrichment (additive; null when the notification didn't contain it).
+    val senderName: String? = null,
+    val recipientName: String? = null,
+    val paymentReference: String? = null,
+    val paymentReason: String? = null,
 )
 
 /**

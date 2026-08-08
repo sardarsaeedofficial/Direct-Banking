@@ -48,4 +48,22 @@ data class TransactionSummary(
     val account: String?,
     val bookedAt: String?,
     val status: String,
-)
+    // ---- Phase 1 rich ledger fields (nullable; absent fields are simply hidden) ----
+    val transactionType: String? = null,
+    val source: String? = null,
+    val senderName: String? = null,
+    val senderBankName: String? = null,
+    val recipientName: String? = null,
+    val recipientBankName: String? = null,
+    val paymentReference: String? = null,
+    val paymentReason: String? = null,
+    val notes: String? = null,
+    val subcategory: String? = null,
+    val occurredAt: String? = null,
+    val settledAt: String? = null,
+    val internalTransferGroupId: String? = null,
+    val internalTransferConfidence: String? = null,
+) {
+    val isInternalTransfer: Boolean get() = transactionType == "INTERNAL_TRANSFER"
+    val isPossibleTransfer: Boolean get() = internalTransferConfidence == "POSSIBLE" && !isInternalTransfer
+}

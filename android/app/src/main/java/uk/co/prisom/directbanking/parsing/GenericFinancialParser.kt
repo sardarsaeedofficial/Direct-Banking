@@ -35,6 +35,10 @@ class GenericFinancialParser : NotificationParser {
             sourcePackage = input.sourcePackage,
             confidence = confidence,
             redactedSourceText = Redaction.redact(text),
+            recipientName = if (resolvedDirection == TransactionDirection.EXPENSE) TransferParsing.recipient(text) else null,
+            senderName = if (resolvedDirection == TransactionDirection.INCOME) TransferParsing.sender(text) else null,
+            paymentReference = TransferParsing.reference(text),
+            paymentReason = TransferParsing.reason(text),
         )
     }
 }

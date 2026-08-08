@@ -18,9 +18,11 @@ import { requireMobileAuth } from "../auth/mobile-middleware.js";
 import { validate, validated } from "../middleware/validate.js";
 import { asyncHandler, HttpError } from "../middleware/error.js";
 import { authLimiter } from "../middleware/rateLimit.js";
-import { createTransaction } from "../services/transactions.service.js";
+import { createTransaction, defaultTypeFor } from "../services/transactions.service.js";
+import { detectAndPairInternalTransfer } from "../services/internal-transfer.service.js";
 import { getDashboard } from "../services/dashboard.service.js";
 import { registerUser } from "../services/users.service.js";
+import { txnCorrectionSchema } from "@direct-banking/shared";
 
 export const mobileRouter = Router();
 
@@ -176,6 +178,71 @@ mobileRouter.get(
   }),
 );
 
+// Manual ledger correction: change classification/metadata for one transaction.
+// This never alters amount/direction/status, so account balances (and the
+// balanceApplied safety flag) are never touched — only the canonical
+// classification changes, which the dashboard totals honour automatically.
+mobileRouter.patch(
+  "/transactions/:id",
+  requireMobileAuth,
+  validate(txnCorrectionSchema),
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const body = validated<typeof txnCorrectionSchema>(res);
+    const txn = await prisma.transaction.findFirst({ where: { id: req.params.id, userId } });
+    if (!txn) throw new HttpError(404, "Transaction not found");
+
+    // A linked own-account (single-sided transfer) must belong to this user.
+    if (body.counterpartyAccountId) {
+      const acc = await prisma.bankAccount.findFirst({ where: { id: body.counterpartyAccountId, userId } });
+      if (!acc) throw new HttpError(404, "Linked account not found");
+    }
+
+    const data: Prisma.TransactionUncheckedUpdateInput = {};
+    if (body.categoryId !== undefined) data.categoryId = body.categoryId;
+    if (body.subcategory !== undefined) data.subcategory = body.subcategory;
+    if (body.senderName !== undefined) data.senderName = body.senderName;
+    if (body.senderBankName !== undefined) data.senderBankName = body.senderBankName;
+    if (body.recipientName !== undefined) data.recipientName = body.recipientName;
+    if (body.recipientBankName !== undefined) data.recipientBankName = body.recipientBankName;
+    if (body.notes !== undefined) data.notes = body.notes;
+    if (body.paymentReason !== undefined) data.paymentReason = body.paymentReason;
+    if (body.paymentReference !== undefined) data.paymentReference = body.paymentReference;
+    if (body.transactionType !== undefined) data.transactionType = body.transactionType;
+
+    // Link the user's own account on the other side of a single-sided transfer.
+    if (body.counterpartyAccountId !== undefined) {
+      if (txn.direction === "INCOME") data.senderAccountId = body.counterpartyAccountId;
+      else data.recipientAccountId = body.counterpartyAccountId;
+    }
+
+    // Explicit internal-transfer control (user confirmation / undo).
+    if (body.markInternalTransfer === true) {
+      data.transactionType = "INTERNAL_TRANSFER";
+      data.internalTransferConfidence = "CONFIRMED";
+      if (!txn.internalTransferGroupId) data.internalTransferGroupId = `manual-${txn.id}`;
+    } else if (body.markInternalTransfer === false) {
+      // Restore normal income/spending classification and unpair both sides.
+      if (txn.internalTransferGroupId) {
+        await prisma.transaction.updateMany({
+          where: { userId, internalTransferGroupId: txn.internalTransferGroupId, id: { not: txn.id } },
+          data: { transactionType: null, internalTransferGroupId: null, internalTransferConfidence: "NOT_INTERNAL" },
+        });
+      }
+      data.transactionType = body.transactionType ?? defaultTypeFor(txn.direction);
+      data.internalTransferGroupId = null;
+      data.internalTransferConfidence = "NOT_INTERNAL";
+    }
+
+    const updated = await prisma.transaction.update({
+      where: { id: txn.id },
+      data,
+      include: { merchant: true, category: true, account: true },
+    });
+    res.json({ transaction: updated });
+  }),
+);
+
 // ── Notification imports ────────────────────────────────────────────────────
 
 mobileRouter.post(
@@ -280,11 +347,22 @@ mobileRouter.post(
             description: c.merchant ?? c.title,
             merchantName: c.merchant ?? c.title,
             categoryId: c.categoryId ?? undefined,
+            // Enrichment (all optional): populate counterparties/reference for the ledger.
+            senderName: c.senderName ?? undefined,
+            senderBankName: c.senderBankName ?? undefined,
+            recipientName: c.recipientName ?? undefined,
+            recipientBankName: c.recipientBankName ?? undefined,
+            paymentReference: c.paymentReference ?? undefined,
+            paymentReason: c.paymentReason ?? undefined,
+            sourceBankPackage: c.sourcePackage,
           },
           tx,
         );
+        // Pair with the opposite side (own-account transfer) atomically within the import.
+        await detectAndPairInternalTransfer(userId, txn.id, tx);
+        const finalTxn = await tx.transaction.findUnique({ where: { id: txn.id }, include: { merchant: true, category: true, account: true } });
         const updated = await tx.notificationImport.update({ where: { id: importRow.id }, data: { approvedTransactionId: txn.id } });
-        return { import: updated, transaction: txn };
+        return { import: updated, transaction: finalTxn };
       });
       res.status(201).json({ ...out, duplicate: false, result: "AUTO_IMPORTED" });
     } catch (err) {
@@ -393,12 +471,15 @@ mobileRouter.patch(
         merchantName: merchant ?? item.parsedMerchant ?? item.title,
         categoryId: body.categoryId ?? undefined,
         notes: body.notes,
+        sourceBankPackage: item.sourcePackage,
       });
+      await detectAndPairInternalTransfer(userId, txn.id);
+      const finalTxn = await prisma.transaction.findUnique({ where: { id: txn.id }, include: { merchant: true, category: true, account: true } });
       const updated = await prisma.notificationImport.update({
         where: { id: item.id },
         data: { approvedTransactionId: txn.id },
       });
-      res.status(201).json({ import: updated, transaction: txn });
+      res.status(201).json({ import: updated, transaction: finalTxn });
     } catch (err) {
       // A transient failure must leave the import reviewable (undo the claim).
       await prisma.notificationImport.updateMany({
