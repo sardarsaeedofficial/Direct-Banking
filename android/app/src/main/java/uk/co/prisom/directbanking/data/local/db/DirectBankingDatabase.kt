@@ -13,8 +13,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         CapturedNotificationEntity::class,
         PendingSyncOpEntity::class,
         ApprovedSourceEntity::class,
+        UpcomingPaymentEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 abstract class DirectBankingDatabase : RoomDatabase() {
@@ -22,6 +23,7 @@ abstract class DirectBankingDatabase : RoomDatabase() {
     abstract fun capturedDao(): CapturedDao
     abstract fun syncDao(): SyncDao
     abstract fun sourceDao(): SourceDao
+    abstract fun upcomingDao(): UpcomingDao
 
     companion object {
         /** v2 adds the user-controlled "permanently ignore" flag to approved_source. */
@@ -52,7 +54,18 @@ abstract class DirectBankingDatabase : RoomDatabase() {
             }
         }
 
-        val ALL_MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+        /** v5 adds the Phase 2 offline cache of upcoming Direct Debit payments (additive). */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `upcoming_payment_cache` (`mandateId` TEXT NOT NULL, " +
+                        "`companyName` TEXT NOT NULL, `account` TEXT NOT NULL, `expectedDate` TEXT, " +
+                        "`expectedAmountMinor` INTEGER NOT NULL, `cachedAtMillis` INTEGER NOT NULL, PRIMARY KEY(`mandateId`))",
+                )
+            }
+        }
+
+        val ALL_MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
 
         fun build(context: Context): DirectBankingDatabase =
             Room.databaseBuilder(context, DirectBankingDatabase::class.java, "directbanking.db")

@@ -8,6 +8,24 @@ data class DashboardSummary(
     val safeToSpendMinor: Long,
     val totalBalanceMinor: Long,
     val remainingDirectDebitsMinor: Long,
+    // Phase 2 Direct Debit analytics.
+    val directDebitsThisMonthMinor: Long = 0,
+    val directDebitsThisYearMinor: Long = 0,
+    val avgMonthlyDirectDebitMinor: Long = 0,
+    val upcoming7DaysMinor: Long = 0,
+    val upcoming30DaysMinor: Long = 0,
+)
+
+/** One upcoming Direct Debit payment for the Home "Upcoming payments" section. */
+data class UpcomingPayment(
+    val mandateId: String,
+    val companyName: String,
+    val account: String,
+    val expectedDate: String?,
+    val expectedAmountMinor: Long,
+    val isRange: Boolean = false,
+    val expectedMinMinor: Long? = null,
+    val expectedMaxMinor: Long? = null,
 )
 
 data class AccountSummary(
@@ -35,6 +53,7 @@ data class DashboardData(
     val accounts: List<AccountSummary>,
     val directDebits: List<DirectDebitSummary>,
     val pendingImports: Int,
+    val upcomingPayments: List<UpcomingPayment> = emptyList(),
 )
 
 data class TransactionSummary(

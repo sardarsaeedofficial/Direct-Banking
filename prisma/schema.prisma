@@ -69,6 +69,50 @@ enum TransferConfidence {
   NOT_INTERNAL
 }
 
+// ---------- Phase 2: Direct Debit engine ----------
+enum DdStatus {
+  ACTIVE
+  PAUSED
+  CANCELLED
+  UNKNOWN
+}
+
+enum DdFrequency {
+  WEEKLY
+  FORTNIGHTLY
+  MONTHLY
+  QUARTERLY
+  YEARLY
+  VARIABLE
+}
+
+// How the expected amount is decided. User configuration (FIXED/RANGE) always
+// takes precedence over a LEARNED prediction.
+enum DdExpectationMode {
+  FIXED
+  RANGE
+  LEARNED
+}
+
+// Result of comparing an actual payment to its expectation.
+enum DdAnomaly {
+  NORMAL
+  ABOVE_EXPECTED
+  BELOW_EXPECTED
+  UNEXPECTED_DATE
+  FIRST_PAYMENT
+  UNKNOWN
+}
+
+// Keeps recurring kinds distinguishable so Phase 4 can add non-DD recurrences
+// without mislabelling them all as Direct Debits.
+enum RecurringKind {
+  DIRECT_DEBIT
+  STANDING_ORDER
+  SUBSCRIPTION
+  RECURRING_CARD
+}
+
 enum RecurringType {
   DIRECT_DEBIT
   STANDING_ORDER
@@ -168,6 +212,7 @@ model User {
   settings      AppSetting[]
   mobileDevices MobileDevice[]
   mobileTokens  MobileRefreshToken[]
+  ddMandates    DirectDebitMandate[]
 }
 
 model Session {
@@ -214,6 +259,7 @@ model BankAccount {
   transfersIn  Transaction[]      @relation("TransferCounterparty")
   recurring    RecurringPayment[]
   expected     ExpectedPayment[]
+  ddMandates   DirectDebitMandate[]
 
   @@index([userId])
 }
@@ -342,6 +388,16 @@ model Transaction {
   subcategory            String?
   rawDescriptionRedacted String?
 
+  // ---- Phase 2: Direct Debit / recurring linkage (additive) ----
+  // A DD transaction stays a normal ledger row but also belongs to its company's
+  // mandate/history.
+  directDebitMandateId String?
+  directDebitMandate   DirectDebitMandate? @relation(fields: [directDebitMandateId], references: [id])
+  recurringPaymentGroupId String?
+  recurringConfidence     Float?
+  recurringKind           RecurringKind?
+  ddAnomaly               DdAnomaly?
+
   attachments Attachment[]
 
   createdAt DateTime @default(now())
@@ -351,8 +407,73 @@ model Transaction {
   @@index([accountId, bookedAt])
   @@index([merchantId])
   @@index([userId, dedupeHash])
+  @@index([directDebitMandateId])
   @@index([userId, internalTransferGroupId])
   @@index([userId, transactionType])
+}
+
+// A recurring payee/mandate (Phase 2). Owns the payment history, the expected
+// amount/date, alert configuration and the learned/user-configured predictions
+// for one company on one source account.
+model DirectDebitMandate {
+  id        String @id @default(cuid())
+  userId    String
+  user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountId String
+  account   BankAccount @relation(fields: [accountId], references: [id])
+
+  // Identity.
+  companyName           String
+  normalizedCompanyName String
+  merchantAlias         String?
+  mandateReference      String?
+  providerMandateId     String?
+
+  status      DdStatus      @default(ACTIVE)
+  kind        RecurringKind @default(DIRECT_DEBIT)
+  frequency   DdFrequency   @default(MONTHLY)
+
+  // Expectation. FIXED/RANGE are user configuration; LEARNED is predicted.
+  expectationMode DdExpectationMode @default(LEARNED)
+  // System-predicted values (kept even when the user overrides).
+  expectedAmountMinor Int?
+  expectedMinMinor    Int?
+  expectedMaxMinor    Int?
+  // User overrides — take precedence over any learned/predicted value.
+  userExpectedAmountMinor Int?
+  userExpectedMinMinor    Int?
+  userExpectedMaxMinor    Int?
+  userConfiguredExpectedAmount Boolean @default(false)
+  learnFromHistory             Boolean @default(true)
+
+  expectedDayOfMonth Int?
+  expectedNextDate   DateTime?
+  userExpectedDate   DateTime? // user override for the next expected date
+  expectedTime       String?
+
+  alertDaysBefore      Int  @default(3)
+  amountTolerancePercent Int  @default(15)
+  amountToleranceMinor   Int?
+
+  // Learned observations.
+  firstSeenAt   DateTime  @default(now())
+  lastPaidAt    DateTime?
+  lastAmountMinor Int?
+  nextExpectedAt  DateTime?
+  paymentCount    Int      @default(0)
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transactions Transaction[]
+
+  // A company appears once per user per source account — subsequent payments
+  // append to the same mandate rather than creating a new one each month.
+  @@unique([userId, accountId, normalizedCompanyName])
+  @@index([userId, status])
+  @@index([userId, nextExpectedAt])
 }
 
 model RecurringPayment {

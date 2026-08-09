@@ -2,6 +2,7 @@ import { prisma } from "../db.js";
 import { startOfMonth, startOfNextMonth } from "@direct-banking/shared";
 import { getBalances, forecastSummary } from "./forecast.service.js";
 import { detectAnomalies } from "./recurring-detection.service.js";
+import { getUpcomingPayments } from "./direct-debit.service.js";
 
 function monthKey(d: Date): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
@@ -117,7 +118,31 @@ export async function getDashboard(userId: string, now = new Date()) {
 
   const unusual = await detectAnomalies(userId);
 
+  // ---- Direct Debit analytics (Phase 2) ----
+  const yearStart = new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
+  const ddAgg = await prisma.transaction.groupBy({
+    by: ["bookedAt"],
+    where: { userId, transactionType: "DIRECT_DEBIT", direction: "EXPENSE", status: { in: ["COMPLETED", "PENDING"] }, bookedAt: { gte: yearStart } },
+    _sum: { amountMinor: true },
+  });
+  let directDebitsThisMonthMinor = 0;
+  let directDebitsThisYearMinor = 0;
+  for (const row of ddAgg) {
+    const amt = Number(row._sum.amountMinor ?? 0);
+    directDebitsThisYearMinor += amt;
+    if (row.bookedAt >= monthStart && row.bookedAt < monthEnd) directDebitsThisMonthMinor += amt;
+  }
+  const monthsElapsed = now.getUTCMonth() + 1;
+  const avgMonthlyDirectDebitMinor = Math.round(directDebitsThisYearMinor / monthsElapsed);
+  const [upcoming7, upcoming30] = await Promise.all([getUpcomingPayments(userId, 7, now), getUpcomingPayments(userId, 30, now)]);
+
   return {
+    directDebitsThisMonthMinor,
+    directDebitsThisYearMinor,
+    avgMonthlyDirectDebitMinor,
+    upcoming7DaysMinor: upcoming7.totalMinor,
+    upcoming30DaysMinor: upcoming30.totalMinor,
+    upcomingPayments: upcoming7.items,
     period: { start: monthStart.toISOString(), end: monthEnd.toISOString() },
     incomeMinor: Number(incomeMinor),
     expenseMinor: Number(expenseMinor),

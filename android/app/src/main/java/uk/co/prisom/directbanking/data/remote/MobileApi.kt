@@ -23,9 +23,15 @@ import uk.co.prisom.directbanking.data.remote.dto.NotifImportRequest
 import uk.co.prisom.directbanking.data.remote.dto.RefreshRequest
 import uk.co.prisom.directbanking.data.remote.dto.RegisterRequest
 import uk.co.prisom.directbanking.data.remote.dto.TokenResponse
+import uk.co.prisom.directbanking.data.remote.dto.DdUpdateRequest
+import uk.co.prisom.directbanking.data.remote.dto.DirectDebitDetailResponse
+import uk.co.prisom.directbanking.data.remote.dto.DirectDebitHistoryResponse
+import uk.co.prisom.directbanking.data.remote.dto.DirectDebitListResponse
+import uk.co.prisom.directbanking.data.remote.dto.DirectDebitUpdateResponse
 import uk.co.prisom.directbanking.data.remote.dto.TransactionListResponse
 import uk.co.prisom.directbanking.data.remote.dto.TxnCorrectionRequest
 import uk.co.prisom.directbanking.data.remote.dto.TxnCorrectionResponse
+import uk.co.prisom.directbanking.data.remote.dto.UpcomingPaymentsResponse
 
 /** Retrofit binding for the Direct Banking mobile API (/api/mobile/v1). */
 interface MobileApi {
@@ -55,6 +61,26 @@ interface MobileApi {
 
     @PATCH("api/mobile/v1/transactions/{id}")
     suspend fun correctTransaction(@Path("id") id: String, @Body body: TxnCorrectionRequest): TxnCorrectionResponse
+
+    // Direct Debits (Phase 2)
+    @GET("api/mobile/v1/direct-debits")
+    suspend fun listDirectDebits(
+        @Query("status") status: String? = null,
+        @Query("search") search: String? = null,
+        @Query("sort") sort: String? = null,
+    ): DirectDebitListResponse
+
+    @GET("api/mobile/v1/direct-debits/{id}")
+    suspend fun directDebit(@Path("id") id: String): DirectDebitDetailResponse
+
+    @GET("api/mobile/v1/direct-debits/{id}/history")
+    suspend fun directDebitHistory(@Path("id") id: String): DirectDebitHistoryResponse
+
+    @PATCH("api/mobile/v1/direct-debits/{id}")
+    suspend fun updateDirectDebit(@Path("id") id: String, @Body body: DdUpdateRequest): DirectDebitUpdateResponse
+
+    @GET("api/mobile/v1/upcoming-payments")
+    suspend fun upcomingPayments(@Query("days") days: Int = 7): UpcomingPaymentsResponse
 
     @POST("api/mobile/v1/notification-imports")
     suspend fun createImport(@Body body: NotifImportRequest): NotifImportCreateResponse

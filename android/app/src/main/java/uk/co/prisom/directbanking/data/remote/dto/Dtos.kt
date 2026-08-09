@@ -82,6 +82,93 @@ data class DashboardDto(
     val safeToSpendMinor: Long = 0,
     val totalBalanceMinor: Long = 0,
     val remainingDirectDebitsMinor: Long = 0,
+    // Phase 2 Direct Debit analytics.
+    val directDebitsThisMonthMinor: Long = 0,
+    val directDebitsThisYearMinor: Long = 0,
+    val avgMonthlyDirectDebitMinor: Long = 0,
+    val upcoming7DaysMinor: Long = 0,
+    val upcoming30DaysMinor: Long = 0,
+    val upcomingPayments: List<UpcomingPaymentDto> = emptyList(),
+)
+
+// Phase 2 — Direct Debit engine -------------------------------------------------
+@Serializable
+data class UpcomingPaymentDto(
+    val mandateId: String,
+    val companyName: String = "",
+    val account: String = "",
+    val accountBank: String = "",
+    val expectedDate: String? = null,
+    val expectedAmountMinor: Long = 0,
+    val isRange: Boolean = false,
+    val expectedMinMinor: Long? = null,
+    val expectedMaxMinor: Long? = null,
+)
+
+@Serializable
+data class DirectDebitMandateDto(
+    val id: String,
+    val companyName: String = "",
+    val status: String = "ACTIVE",
+    val kind: String = "DIRECT_DEBIT",
+    val frequency: String = "MONTHLY",
+    val expectationMode: String = "LEARNED",
+    val effectiveAmountMinor: Long? = null,
+    val effectiveMinMinor: Long? = null,
+    val effectiveMaxMinor: Long? = null,
+    val expectedDayOfMonth: Int? = null,
+    val nextExpectedAt: String? = null,
+    val lastPaidAt: String? = null,
+    val lastAmountMinor: Long? = null,
+    val paymentCount: Int = 0,
+    val alertDaysBefore: Int = 3,
+    val notes: String? = null,
+    val account: TxnAccountRef? = null,
+)
+
+@Serializable
+data class DdStatsDto(
+    val paidThisMonthMinor: Long = 0,
+    val paidThisYearMinor: Long = 0,
+    val averageMinor: Long = 0,
+    val medianMinor: Long = 0,
+    val highestMinor: Long = 0,
+    val lowestMinor: Long = 0,
+)
+
+@Serializable
+data class DdHistoryItemDto(
+    val id: String,
+    val amountMinor: Long = 0,
+    val currency: String = "GBP",
+    val bookedAt: String? = null,
+    val ddAnomaly: String? = null,
+    val status: String = "COMPLETED",
+    val description: String? = null,
+)
+
+@Serializable data class DirectDebitListResponse(val items: List<DirectDebitMandateDto> = emptyList())
+@Serializable data class DirectDebitDetailResponse(val mandate: DirectDebitMandateDto, val stats: DdStatsDto = DdStatsDto())
+@Serializable data class DirectDebitHistoryResponse(val items: List<DdHistoryItemDto> = emptyList())
+@Serializable data class DirectDebitUpdateResponse(val mandate: DirectDebitMandateDto)
+@Serializable data class UpcomingPaymentsResponse(val items: List<UpcomingPaymentDto> = emptyList(), val totalMinor: Long = 0)
+
+@Serializable
+data class DdUpdateRequest(
+    val companyName: String? = null,
+    val accountId: String? = null,
+    val status: String? = null,
+    val frequency: String? = null,
+    val expectationMode: String? = null,
+    val userExpectedAmountMinor: Long? = null,
+    val userExpectedMinMinor: Long? = null,
+    val userExpectedMaxMinor: Long? = null,
+    val userExpectedDate: String? = null,
+    val expectedDayOfMonth: Int? = null,
+    val alertDaysBefore: Int? = null,
+    val amountTolerancePercent: Int? = null,
+    val learnFromHistory: Boolean? = null,
+    val notes: String? = null,
 )
 
 @Serializable
@@ -231,6 +318,8 @@ data class TxnCorrectionRequest(
     val paymentReference: String? = null,
     val markInternalTransfer: Boolean? = null,
     val counterpartyAccountId: String? = null,
+    val markDirectDebit: Boolean? = null,
+    val directDebitCompany: String? = null,
 )
 
 @Serializable data class TxnCorrectionResponse(val transaction: TransactionItemDto)

@@ -31,6 +31,7 @@ import uk.co.prisom.directbanking.ui.screens.CreateAccountScreen
 import uk.co.prisom.directbanking.ui.screens.DashboardScreen
 import uk.co.prisom.directbanking.ui.screens.DiagnosticsScreen
 import uk.co.prisom.directbanking.ui.screens.DirectDebitsScreen
+import uk.co.prisom.directbanking.ui.screens.DirectDebitDetailScreen
 import uk.co.prisom.directbanking.ui.screens.DisclosureScreen
 import uk.co.prisom.directbanking.ui.screens.NotificationAccessScreen
 import uk.co.prisom.directbanking.ui.screens.NotificationsScreen
@@ -44,6 +45,8 @@ import uk.co.prisom.directbanking.ui.session.SessionState
 import uk.co.prisom.directbanking.ui.session.SessionViewModel
 import uk.co.prisom.directbanking.ui.vm.DashboardViewModel
 import uk.co.prisom.directbanking.ui.vm.DiagnosticsViewModel
+import uk.co.prisom.directbanking.ui.vm.DirectDebitDetailViewModel
+import uk.co.prisom.directbanking.ui.vm.DirectDebitsViewModel
 import uk.co.prisom.directbanking.ui.vm.OverviewViewModel
 import uk.co.prisom.directbanking.ui.vm.ReviewViewModel
 import uk.co.prisom.directbanking.ui.vm.SettingsViewModel
@@ -59,6 +62,7 @@ private object Routes {
     const val SETTINGS = "settings"
     const val ACCOUNTS = "accounts"
     const val DIRECT_DEBITS = "directdebits"
+    const val DIRECT_DEBIT_DETAIL = "directdebit"
     const val NOTIFICATIONS = "notifications"
     const val SYNC = "sync"
     const val ACCESS = "notificationaccess"
@@ -162,7 +166,16 @@ private fun MainNav(session: SessionViewModel) {
                 DiagnosticsScreen(containerViewModel { DiagnosticsViewModel(it.diagnostics) })
             }
             composable(Routes.ACCOUNTS) { AccountsScreen(containerViewModel { OverviewViewModel(it.dashboardRepository) }) }
-            composable(Routes.DIRECT_DEBITS) { DirectDebitsScreen(containerViewModel { OverviewViewModel(it.dashboardRepository) }) }
+            composable(Routes.DIRECT_DEBITS) {
+                DirectDebitsScreen(
+                    vm = containerViewModel { DirectDebitsViewModel(it.directDebitRepository) },
+                    onOpen = { id -> nav.navigate("${Routes.DIRECT_DEBIT_DETAIL}/$id") },
+                )
+            }
+            composable("${Routes.DIRECT_DEBIT_DETAIL}/{id}") { entry ->
+                val id = entry.arguments?.getString("id") ?: ""
+                DirectDebitDetailScreen(containerViewModel { DirectDebitDetailViewModel(it.directDebitRepository, id) })
+            }
             composable(Routes.NOTIFICATIONS) { NotificationsScreen() }
             composable(Routes.SYNC) {
                 SyncStatusScreen(containerViewModel { SyncViewModel(it.syncRepository, it.appPreferences, it.appContext) })
