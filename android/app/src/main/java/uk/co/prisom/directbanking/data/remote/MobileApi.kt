@@ -23,7 +23,13 @@ import uk.co.prisom.directbanking.data.remote.dto.NotifImportRequest
 import uk.co.prisom.directbanking.data.remote.dto.RefreshRequest
 import uk.co.prisom.directbanking.data.remote.dto.RegisterRequest
 import uk.co.prisom.directbanking.data.remote.dto.TokenResponse
+import uk.co.prisom.directbanking.data.remote.dto.BankConnectionDetailResponse
+import uk.co.prisom.directbanking.data.remote.dto.BankConnectionListResponse
 import uk.co.prisom.directbanking.data.remote.dto.DdUpdateRequest
+import uk.co.prisom.directbanking.data.remote.dto.ReauthorizeResponse
+import uk.co.prisom.directbanking.data.remote.dto.RevokeResponse
+import uk.co.prisom.directbanking.data.remote.dto.StartConnectionResponse
+import uk.co.prisom.directbanking.data.remote.dto.SyncResponse
 import uk.co.prisom.directbanking.data.remote.dto.DirectDebitDetailResponse
 import uk.co.prisom.directbanking.data.remote.dto.DirectDebitHistoryResponse
 import uk.co.prisom.directbanking.data.remote.dto.DirectDebitListResponse
@@ -81,6 +87,25 @@ interface MobileApi {
 
     @GET("api/mobile/v1/upcoming-payments")
     suspend fun upcomingPayments(@Query("days") days: Int = 7): UpcomingPaymentsResponse
+
+    // Bank connections / Open Banking (Phase 3)
+    @POST("api/mobile/v1/bank-connections/start")
+    suspend fun startBankConnection(): StartConnectionResponse
+
+    @GET("api/mobile/v1/bank-connections")
+    suspend fun listBankConnections(): BankConnectionListResponse
+
+    @GET("api/mobile/v1/bank-connections/{id}")
+    suspend fun bankConnection(@Path("id") id: String): BankConnectionDetailResponse
+
+    @POST("api/mobile/v1/bank-connections/{id}/sync")
+    suspend fun syncBankConnection(@Path("id") id: String): SyncResponse
+
+    @POST("api/mobile/v1/bank-connections/{id}/reauthorize")
+    suspend fun reauthorizeBankConnection(@Path("id") id: String): ReauthorizeResponse
+
+    @DELETE("api/mobile/v1/bank-connections/{id}")
+    suspend fun deleteBankConnection(@Path("id") id: String): RevokeResponse
 
     @POST("api/mobile/v1/notification-imports")
     suspend fun createImport(@Body body: NotifImportRequest): NotifImportCreateResponse

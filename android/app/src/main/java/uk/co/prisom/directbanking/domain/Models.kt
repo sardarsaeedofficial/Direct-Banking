@@ -46,6 +46,13 @@ data class DirectDebitSummary(
     val nextDueDate: String?,
 )
 
+/** Aggregate Open Banking sync status shown on Home (Phase 3). */
+data class BankSyncStatus(
+    val connectionCount: Int = 0,
+    val needsAttention: Int = 0,
+    val lastBankSyncAt: String? = null,
+)
+
 data class DashboardData(
     val displayName: String?,
     val baseCurrency: String,
@@ -54,6 +61,7 @@ data class DashboardData(
     val directDebits: List<DirectDebitSummary>,
     val pendingImports: Int,
     val upcomingPayments: List<UpcomingPayment> = emptyList(),
+    val bankSync: BankSyncStatus = BankSyncStatus(),
 )
 
 data class TransactionSummary(

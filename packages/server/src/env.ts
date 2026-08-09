@@ -33,6 +33,20 @@ const schema = z.object({
   SMTP_USER: z.string().optional(),
   SMTP_PASS: z.string().optional(),
   SMTP_FROM: z.string().optional(),
+  // ---- Open Banking (Phase 3). All optional so CI/tests need no real secrets. ----
+  // When disabled the notification-only app keeps working normally.
+  OPEN_BANKING_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
+  OPEN_BANKING_PROVIDER: z.string().default("truelayer"),
+  TRUELAYER_ENV: z.enum(["sandbox", "live"]).default("sandbox"),
+  TRUELAYER_CLIENT_ID: z.string().optional(),
+  TRUELAYER_CLIENT_SECRET: z.string().optional(),
+  TRUELAYER_RETURN_URI: z.string().optional(),
+  // 32-byte key (hex or base64) for AES-256-GCM encryption of connection material.
+  OPEN_BANKING_DATA_KEY: z.string().optional(),
+  BANK_SYNC_CRON: z.string().optional(),
 });
 
 const parsed = schema.safeParse(process.env);

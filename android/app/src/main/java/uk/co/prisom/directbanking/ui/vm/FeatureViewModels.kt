@@ -351,3 +351,55 @@ class DirectDebitDetailViewModel(private val repo: DirectDebitRepository, privat
         RefreshSignal.trigger()
     }
 }
+
+class BankConnectionsViewModel(private val repo: uk.co.prisom.directbanking.data.repository.BankConnectionRepository) : ViewModel() {
+    private val _state = MutableStateFlow<Async<List<uk.co.prisom.directbanking.data.remote.dto.BankConnectionDto>>>(Async.Loading)
+    val state = _state.asStateFlow()
+    val authUrl = MutableStateFlow<String?>(null)
+    val starting = MutableStateFlow(false)
+
+    init { refresh() }
+    fun refresh() = viewModelScope.launch {
+        _state.value = Async.Loading
+        _state.value = runCatching { repo.list() }
+            .recoverCatching { repo.cached() } // offline fallback
+            .fold({ Async.Success(it) }, { Async.Failure(errorText(it)) })
+    }
+
+    /** Begin a connection; emits the authorization URL for the UI to open in a browser. */
+    fun connectAnother() = viewModelScope.launch {
+        starting.value = true
+        runCatching { repo.start() }.onSuccess { (_, url) -> authUrl.value = url }
+        starting.value = false
+    }
+    fun consumedAuthUrl() { authUrl.value = null }
+}
+
+class BankConnectionDetailViewModel(
+    private val repo: uk.co.prisom.directbanking.data.repository.BankConnectionRepository,
+    private val connectionId: String,
+) : ViewModel() {
+    private val _state = MutableStateFlow<Async<uk.co.prisom.directbanking.data.remote.dto.BankConnectionDetailResponse>>(Async.Loading)
+    val state = _state.asStateFlow()
+    val authUrl = MutableStateFlow<String?>(null)
+    val message = MutableStateFlow<String?>(null)
+
+    init { load() }
+    fun load() = viewModelScope.launch {
+        _state.value = Async.Loading
+        _state.value = runCatching { repo.detail(connectionId) }.fold({ Async.Success(it) }, { Async.Failure(errorText(it)) })
+    }
+    fun syncNow() = viewModelScope.launch {
+        message.value = "Syncing…"
+        runCatching { repo.sync(connectionId) }
+            .onSuccess { message.value = "Synced ${it.imported + it.matched} transactions"; load() }
+            .onFailure { message.value = "Sync failed — will retry later" }
+    }
+    fun reconnect() = viewModelScope.launch {
+        runCatching { repo.reauthorize(connectionId) }.onSuccess { authUrl.value = it }
+    }
+    fun disconnect(onDone: () -> Unit) = viewModelScope.launch {
+        runCatching { repo.disconnect(connectionId) }.onSuccess { onDone() }
+    }
+    fun consumedAuthUrl() { authUrl.value = null }
+}

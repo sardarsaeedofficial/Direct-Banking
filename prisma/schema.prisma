@@ -113,6 +113,25 @@ enum RecurringKind {
   RECURRING_CARD
 }
 
+// ---------- Phase 3: Open Banking ----------
+enum BankConnectionStatus {
+  PENDING
+  AUTHORIZATION_REQUIRED
+  ACTIVE
+  REAUTH_REQUIRED
+  EXPIRED
+  REVOKED
+  ERROR
+}
+
+// Who owns the truth for an account's balance. Manual accounts are LEDGER
+// (balance = opening + credits − debits); Open-Banking-connected accounts are
+// PROVIDER (the bank's reported balance is authoritative).
+enum BalanceAuthority {
+  LEDGER
+  PROVIDER
+}
+
 enum RecurringType {
   DIRECT_DEBIT
   STANDING_ORDER
@@ -213,6 +232,7 @@ model User {
   mobileDevices MobileDevice[]
   mobileTokens  MobileRefreshToken[]
   ddMandates    DirectDebitMandate[]
+  bankConnections BankConnection[]
 }
 
 model Session {
@@ -254,6 +274,15 @@ model BankAccount {
   accountNumberMasked String?
   ibanMasked          String?
   providerAccountId   String? // stable id from an Open Banking / statement provider
+
+  // ---- Phase 3: Open Banking linkage ----
+  balanceAuthority     BalanceAuthority @default(LEDGER)
+  availableBalanceMinor BigInt?
+  bankConnectionId     String?
+  bankConnection       BankConnection? @relation(fields: [bankConnectionId], references: [id], onDelete: SetNull)
+  // Opaque provider ownership key, used internally to strengthen own-account
+  // transfer detection (never exposed in full to the client).
+  providerOwnershipKey String?
 
   transactions Transaction[]      @relation("AccountTransactions")
   transfersIn  Transaction[]      @relation("TransferCounterparty")
@@ -398,6 +427,13 @@ model Transaction {
   recurringKind           RecurringKind?
   ddAnomaly               DdAnomaly?
 
+  // ---- Phase 3: reconciliation ----
+  // A POSSIBLE (not auto-merged) reconciliation match points here for review.
+  possibleDuplicateOfId String?
+  possibleDuplicateOf   Transaction?  @relation("TxnPossibleDup", fields: [possibleDuplicateOfId], references: [id])
+  possibleDuplicates    Transaction[] @relation("TxnPossibleDup")
+  evidence              TransactionEvidence[]
+
   attachments Attachment[]
 
   createdAt DateTime @default(now())
@@ -474,6 +510,70 @@ model DirectDebitMandate {
   @@unique([userId, accountId, normalizedCompanyName])
   @@index([userId, status])
   @@index([userId, nextExpectedAt])
+}
+
+// A user's Open Banking connection to one institution (Phase 3). Provider tokens
+// / connection identifiers are stored ONLY as authenticated-encrypted ciphertext.
+// Bank credentials (username/password/PIN) are never requested or stored.
+model BankConnection {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  provider                      String // e.g. "truelayer"
+  providerConnectionIdEncrypted String? // AES-GCM ciphertext of provider tokens/ids
+  status                        BankConnectionStatus @default(PENDING)
+
+  institutionName       String?
+  institutionProviderId String?
+
+  consentGrantedAt     DateTime?
+  consentExpiresAt     DateTime?
+  lastSyncedAt         DateTime?
+  lastSuccessfulSyncAt DateTime?
+  lastErrorAt          DateTime?
+  lastErrorCode        String?
+
+  // Short-lived one-time CSRF state for the authorization callback, bound to the
+  // user + device + this connection attempt.
+  authState          String?  @unique
+  authStateExpiresAt DateTime?
+  authDeviceId       String?
+  historyImportedAt  DateTime?
+
+  accounts BankAccount[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, status])
+}
+
+// Each way a canonical transaction was observed (Phase 3). One transaction can
+// have several evidence rows (a fast notification + an authoritative Open Banking
+// record). Unique on the provider transaction id for idempotent imports.
+model TransactionEvidence {
+  id            String      @id @default(cuid())
+  transactionId String
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  sourceType TxnSource
+
+  provider              String?
+  providerConnectionId  String?
+  providerAccountId     String?
+  providerTransactionId String?
+
+  notificationFingerprint String?
+
+  observedAt     DateTime @default(now())
+  rawPayloadHash String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([provider, providerTransactionId])
+  @@index([transactionId])
+  @@index([notificationFingerprint])
 }
 
 model RecurringPayment {
