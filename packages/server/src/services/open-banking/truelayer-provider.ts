@@ -11,24 +11,26 @@ import type {
   StartConnectionInput,
   StartConnectionResult,
 } from "./provider.js";
+import { UnsupportedOperationError } from "./provider.js";
 
-// TrueLayer Data API v3 adapter.
+// TrueLayer Data API v3 adapter, verified against the official Data v3 reference
+// (docs.truelayer.com/reference: create-connection, get-accounts (connected-accounts)).
 //
-// Data v3 uses a SERVER client-credentials token (scope "data") plus a connection
-// id — there is no per-user authorization-code / access-token / refresh-token
-// model, and no /data/v1/* endpoints. The lifecycle is:
-//   POST /v3/data-connections  (client-credentials token, scopes accounts/balance/transactions)
-//     → { id, authorization_uri }
-//   user completes the hosted TrueLayer/bank journey → returns to our return URI
-//   GET  /v3/data-connections/{id}         → resolve/verify the connection state
-//   GET  /v3/connected-accounts            (Connection-Id header)
-//   GET  /v3/connected-accounts/{id}/balance
-//   GET  /v3/connected-accounts/{id}/transactions?cursor=…   (cursor pagination)
-//   DELETE /v3/data-connections/{id}       → revoke
+// Data v3 uses a SERVER client-credentials token (scope "data") plus a Connection-Id
+// header — there is no per-user authorization-code / access-token / refresh-token
+// model, and no /data/v1/* endpoints. Verified lifecycle:
+//   POST /v3/data-connections   (client-credentials token; scopes/provider_selection/
+//                                user/user_consent/hosted_page/data_access_type)
+//     → 201 { id, status, hosted_page: { uri } }
+//   user completes the hosted TrueLayer/bank journey → returns to our return_uri
+//   GET  /v3/data-connections/{id}   → resolve/verify the connection status
+//   GET  /v3/connected-accounts      (Connection-Id header) → { items, pagination.next_cursor }
 //
-// Endpoint hosts are configurable per environment. The exact request/response
-// shapes must be confirmed against the current official Data v3 OpenAPI before
-// production activation; CI exercises this adapter with mocked v3 fixtures.
+// IMPORTANT: Data API v3 does NOT currently document account balance or transaction
+// endpoints (those live only in Data API v1, which this provider must not call), and
+// it exposes no connection-delete endpoint. Accordingly BALANCES and TRANSACTIONS are
+// reported UNSUPPORTED here, and revocation is handled locally. When TrueLayer publishes
+// v3 balance/transaction endpoints, implement them here and re-enable the capabilities.
 
 interface TrueLayerConfig {
   clientId: string;
@@ -73,7 +75,9 @@ export class TrueLayerDataV3Provider implements BankDataProvider {
   constructor(private readonly cfg: TrueLayerConfig) {}
 
   capabilities(): Set<ProviderCapability> {
-    return new Set<ProviderCapability>(["ACCOUNTS", "BALANCES", "TRANSACTIONS", "ACCOUNT_HOLDER_NAMES"]);
+    // Data v3 exposes connected accounts (+ holder names) but not balances or
+    // transactions — those remain Data v1 only, which we must not call.
+    return new Set<ProviderCapability>(["ACCOUNTS", "ACCOUNT_HOLDER_NAMES"]);
   }
   // The Data v3 adapter exposes no DD-mandate endpoint; Phase 2 inference owns
   // Direct Debit history (§14).
@@ -150,19 +154,26 @@ export class TrueLayerDataV3Provider implements BankDataProvider {
   // ── Connection lifecycle (Data v3) ────────────────────────────────────────
 
   async createConnection(input: StartConnectionInput): Promise<StartConnectionResult> {
-    // Our one-time application nonce travels on our own return URI; it is not the
-    // provider's OAuth state.
-    const redirectUri = `${input.returnUri}${input.returnUri.includes("?") ? "&" : "?"}state=${encodeURIComponent(input.state)}`;
-    const body = await this.apiFetch<{ id?: string; connection_id?: string; authorization_uri?: string; authorization_url?: string }>(
-      "/v3/data-connections",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ scopes: this.cfg.scopes, redirect_uri: redirectUri, provider_selection: { providers: "uk-ob-all uk-oauth-all" } }),
-      },
-    );
-    const providerConnectionId = body.id ?? body.connection_id;
-    const authorizationUrl = body.authorization_uri ?? body.authorization_url;
+    // Our one-time application nonce travels on our own return_uri; it is not a
+    // provider OAuth state. hosted_page (type authorization_flow) yields the hosted
+    // authorization URI and the redirect target after completion.
+    const returnUri = `${input.returnUri}${input.returnUri.includes("?") ? "&" : "?"}state=${encodeURIComponent(input.state)}`;
+    const u = input.user ?? {};
+    const requestBody = {
+      scopes: this.cfg.scopes,
+      provider_selection: { type: "user_selected" as const },
+      user: { id: u.id ?? input.userId, name: u.name ?? "Direct Banking user", email: u.email ?? undefined, phone: u.phone ?? undefined },
+      user_consent: { type: "authorization_flow_captured" as const },
+      hosted_page: { type: "authorization_flow" as const, return_uri: returnUri, country_code: "GB", language_code: "en" },
+      data_access_type: "recurring" as const,
+    };
+    const body = await this.apiFetch<{ id?: string; status?: string; hosted_page?: { uri?: string } }>("/v3/data-connections", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(requestBody),
+    });
+    const providerConnectionId = body.id;
+    const authorizationUrl = body.hosted_page?.uri;
     if (!providerConnectionId || !authorizationUrl) throw new Error("Malformed data-connection response");
     return { authorizationUrl, providerConnectionId };
   }
@@ -208,93 +219,57 @@ export class TrueLayerDataV3Provider implements BankDataProvider {
   // ── Data (Data v3 connected-account API) ───────────────────────────────────
 
   async listAccounts(secret: ProviderConnectionSecret): Promise<ProviderAccount[]> {
+    type Identifier = { type?: string; iban?: string; account_number?: string; sort_code?: string };
     type Row = {
-      account_id: string; account_type?: string; display_name?: string; currency: string;
-      account_identifiers?: Array<{ type?: string; iban?: string; account_number?: string; sort_code?: string }>;
-      account_holder_name?: string;
+      id: string; type?: string; account_type?: string; currency: string; customer_segment?: string; bic?: string;
+      account_identifiers?: Identifier[];
+      account_holder_names?: string[];
       provider?: { display_name?: string; provider_id?: string };
     };
-    const data = await this.apiFetch<{ results?: Row[]; accounts?: Row[] }>("/v3/connected-accounts", {}, secret.providerConnectionId);
-    const rows = data.results ?? data.accounts ?? [];
-    return rows.map((r) => {
-      const ids = r.account_identifiers ?? [];
-      const iban = ids.find((i) => i.iban)?.iban;
-      const num = ids.find((i) => i.account_number)?.account_number;
-      const sort = ids.find((i) => i.sort_code)?.sort_code;
-      return {
-        providerAccountId: r.account_id,
-        displayName: r.display_name ?? null,
-        accountType: r.account_type ?? null,
-        currency: r.currency,
-        institutionName: r.provider?.display_name ?? null,
-        institutionProviderId: r.provider?.provider_id ?? null,
-        accountHolderName: r.account_holder_name ?? null,
-        maskedAccountNumber: mask(num),
-        maskedSortCode: mask(sort),
-        maskedIban: mask(iban),
-        ownershipKey: r.account_id,
-      };
-    });
-  }
+    type Page = { items?: Row[]; pagination?: { next_cursor?: string } };
 
-  async getBalances(secret: ProviderConnectionSecret, providerAccountId: string): Promise<ProviderBalance> {
-    type Row = { currency: string; current: number; available?: number };
-    const data = await this.apiFetch<{ results?: Row[]; balance?: Row }>(`/v3/connected-accounts/${providerAccountId}/balance`, {}, secret.providerConnectionId);
-    const b = data.results?.[0] ?? data.balance;
-    return {
-      providerAccountId,
-      currentMinor: Math.round((b?.current ?? 0) * 100),
-      availableMinor: b?.available != null ? Math.round(b.available * 100) : null,
-      currency: b?.currency ?? "GBP",
-    };
-  }
-
-  async getTransactions(secret: ProviderConnectionSecret, providerAccountId: string, opts?: GetTransactionsOptions): Promise<ProviderTransaction[]> {
-    type Row = {
-      transaction_id: string; timestamp: string; description?: string; amount: number; currency: string;
-      transaction_type?: string; transaction_category?: string; merchant_name?: string; status?: string; settled_at?: string;
-    };
-    type Page = { results?: Row[]; transactions?: Row[]; cursor?: string; next_cursor?: string; next?: string };
-    const out: ProviderTransaction[] = [];
+    const out: ProviderAccount[] = [];
     let cursor: string | undefined;
     for (let page = 0; page < MAX_PAGES; page++) {
-      const q = new URLSearchParams();
-      if (opts?.fromIso) q.set("from", opts.fromIso);
-      if (opts?.toIso) q.set("to", opts.toIso);
-      if (cursor) q.set("cursor", cursor);
-      const suffix = q.toString() ? `?${q.toString()}` : "";
-      const data = await this.apiFetch<Page>(`/v3/connected-accounts/${providerAccountId}/transactions${suffix}`, {}, secret.providerConnectionId);
-      const rows = data.results ?? data.transactions ?? [];
-      for (const r of rows) {
-        const credit = (r.transaction_type ?? "").toUpperCase() === "CREDIT" || r.amount > 0;
-        const settled = (r.status ?? "settled").toLowerCase() !== "pending";
+      const suffix = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+      const data = await this.apiFetch<Page>(`/v3/connected-accounts${suffix}`, {}, secret.providerConnectionId);
+      for (const r of data.items ?? []) {
+        const ids = r.account_identifiers ?? [];
         out.push({
-          providerTransactionId: r.transaction_id,
-          providerAccountId,
-          amountMinor: Math.abs(Math.round(r.amount * 100)),
+          providerAccountId: r.id,
+          displayName: r.account_holder_names?.[0] ?? null,
+          accountType: r.account_type ?? r.type ?? null,
           currency: r.currency,
-          direction: credit ? "INCOME" : "EXPENSE",
-          status: settled ? "SETTLED" : "PENDING",
-          bookedAt: r.timestamp,
-          settledAt: r.settled_at ?? null,
-          merchantName: r.merchant_name ?? null,
-          description: r.description ?? null,
-          category: r.transaction_category ?? null,
-          isDirectDebit: (r.transaction_category ?? "").toUpperCase().includes("DIRECT_DEBIT"),
+          institutionName: r.provider?.display_name ?? null,
+          institutionProviderId: r.provider?.provider_id ?? null,
+          accountHolderName: r.account_holder_names?.[0] ?? null,
+          maskedAccountNumber: mask(ids.find((i) => i.account_number)?.account_number),
+          maskedSortCode: mask(ids.find((i) => i.sort_code)?.sort_code),
+          maskedIban: mask(ids.find((i) => i.iban)?.iban),
+          ownershipKey: r.id,
         });
       }
-      cursor = data.next_cursor ?? data.cursor ?? undefined;
+      cursor = data.pagination?.next_cursor ?? undefined;
       if (!cursor) break;
     }
     return out;
   }
 
-  async revokeConnection(secret: ProviderConnectionSecret): Promise<void> {
-    try {
-      await this.apiFetch(`/v3/data-connections/${secret.providerConnectionId}`, { method: "DELETE" });
-    } catch {
-      // Best-effort; the connection is marked REVOKED locally regardless.
-    }
+  // Data API v3 does not expose account balances — do NOT fall back to Data v1.
+  async getBalances(_secret: ProviderConnectionSecret, _providerAccountId: string): Promise<ProviderBalance> {
+    throw new UnsupportedOperationError("BALANCES (not available in TrueLayer Data API v3)");
+  }
+
+  // Data API v3 does not expose account transactions — do NOT fall back to Data v1.
+  async getTransactions(_secret: ProviderConnectionSecret, _providerAccountId: string, _opts?: GetTransactionsOptions): Promise<ProviderTransaction[]> {
+    throw new UnsupportedOperationError("TRANSACTIONS (not available in TrueLayer Data API v3)");
+  }
+
+  // Data API v3 documents no connection-delete endpoint; revocation is handled
+  // locally (we drop stored material) and by the user withdrawing consent at the
+  // bank. We must not call a v1/legacy delete-credential endpoint.
+  async revokeConnection(_secret: ProviderConnectionSecret): Promise<void> {
+    return;
   }
 }
 

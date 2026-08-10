@@ -40,7 +40,15 @@ export async function startConnection(userId: string, deviceId: string | null, r
       authDeviceId: deviceId,
     },
   });
-  const { authorizationUrl, providerConnectionId } = await provider.createConnection({ userId, connectionId: conn.id, state, returnUri });
+  // Data v3 requires end-user details (name + email/phone) to create the connection.
+  const u = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, displayName: true } });
+  const { authorizationUrl, providerConnectionId } = await provider.createConnection({
+    userId,
+    connectionId: conn.id,
+    state,
+    returnUri,
+    user: { id: userId, name: u?.displayName ?? "Direct Banking user", email: u?.email ?? null },
+  });
   await prisma.bankConnection.update({
     where: { id: conn.id },
     // Store only the connection id — Data v3 needs no per-user access/refresh tokens.
@@ -104,7 +112,11 @@ export async function reauthorize(userId: string, connectionId: string, deviceId
   const conn = await prisma.bankConnection.findFirst({ where: { id: connectionId, userId } });
   if (!conn) return null;
   const state = randomBytes(24).toString("base64url");
-  const { authorizationUrl, providerConnectionId } = await provider.createConnection({ userId, connectionId: conn.id, state, returnUri });
+  const u = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, displayName: true } });
+  const { authorizationUrl, providerConnectionId } = await provider.createConnection({
+    userId, connectionId: conn.id, state, returnUri,
+    user: { id: userId, name: u?.displayName ?? "Direct Banking user", email: u?.email ?? null },
+  });
   await prisma.bankConnection.update({
     where: { id: conn.id },
     data: {
@@ -133,15 +145,22 @@ export async function revokeConnection(userId: string, connectionId: string): Pr
   return true;
 }
 
-/** Find/link/create the BankAccount for a provider account without duplicating a manual account. */
-async function linkOrCreateAccount(userId: string, conn: BankConnection, pAcc: ProviderAccount): Promise<string> {
+/**
+ * Find/link/create the BankAccount for a provider account without duplicating a
+ * manual account. An account only becomes PROVIDER-authoritative when the provider
+ * can actually supply balances (otherwise it stays LEDGER — Data v3 gives accounts
+ * but not balances, so linked accounts still improve own-account transfer detection
+ * via ownership keys/holder names while balances continue coming from notifications).
+ */
+async function linkOrCreateAccount(userId: string, conn: BankConnection, pAcc: ProviderAccount, providerAuthoritative: boolean): Promise<string> {
+  const authority = providerAuthoritative ? ("PROVIDER" as const) : undefined; // undefined = leave existing (defaults LEDGER on create)
   // 1) Already linked by provider account id → reuse.
   const linked = await prisma.bankAccount.findFirst({ where: { userId, providerAccountId: pAcc.providerAccountId } });
   if (linked) {
     await prisma.bankAccount.update({
       where: { id: linked.id },
       data: {
-        balanceAuthority: "PROVIDER", bankConnectionId: conn.id, providerOwnershipKey: pAcc.ownershipKey ?? undefined,
+        balanceAuthority: authority, bankConnectionId: conn.id, providerOwnershipKey: pAcc.ownershipKey ?? undefined,
         accountHolderName: pAcc.accountHolderName ?? linked.accountHolderName,
         sortCodeMasked: pAcc.maskedSortCode ?? linked.sortCodeMasked,
         accountNumberMasked: pAcc.maskedAccountNumber ?? linked.accountNumberMasked,
@@ -159,7 +178,7 @@ async function linkOrCreateAccount(userId: string, conn: BankConnection, pAcc: P
     await prisma.bankAccount.update({
       where: { id: manual.id },
       data: {
-        providerAccountId: pAcc.providerAccountId, balanceAuthority: "PROVIDER", bankConnectionId: conn.id, providerOwnershipKey: pAcc.ownershipKey ?? undefined,
+        providerAccountId: pAcc.providerAccountId, balanceAuthority: authority, bankConnectionId: conn.id, providerOwnershipKey: pAcc.ownershipKey ?? undefined,
         accountHolderName: pAcc.accountHolderName ?? manual.accountHolderName,
         sortCodeMasked: pAcc.maskedSortCode ?? manual.sortCodeMasked,
         accountNumberMasked: pAcc.maskedAccountNumber ?? manual.accountNumberMasked,
@@ -168,11 +187,11 @@ async function linkOrCreateAccount(userId: string, conn: BankConnection, pAcc: P
     });
     return manual.id;
   }
-  // 3) Create a new provider-authoritative account.
+  // 3) Create a new account (PROVIDER-authoritative only when balances are available).
   const created = await prisma.bankAccount.create({
     data: {
       userId, bankName, nickname: pAcc.displayName ?? bankName, currency: pAcc.currency,
-      providerAccountId: pAcc.providerAccountId, balanceAuthority: "PROVIDER", bankConnectionId: conn.id, providerOwnershipKey: pAcc.ownershipKey,
+      providerAccountId: pAcc.providerAccountId, balanceAuthority: providerAuthoritative ? "PROVIDER" : "LEDGER", bankConnectionId: conn.id, providerOwnershipKey: pAcc.ownershipKey,
       accountHolderName: pAcc.accountHolderName ?? null,
       sortCodeMasked: pAcc.maskedSortCode ?? null, accountNumberMasked: pAcc.maskedAccountNumber ?? null, ibanMasked: pAcc.maskedIban ?? null,
     },
@@ -204,23 +223,33 @@ export async function syncConnection(userId: string, connectionId: string, opts:
 
   try {
     const secret = readSecret(conn);
+    // Gate work on what the provider actually supports. TrueLayer Data v3 supplies
+    // accounts (+ holder names) but not balances/transactions, so those steps are
+    // skipped for it while the rest of Direct Banking keeps working.
+    const caps = provider.capabilities();
+    const hasBalances = caps.has("BALANCES");
+    const hasTransactions = caps.has("TRANSACTIONS");
+
     const providerAccounts = await provider.listAccounts(secret);
     // Do not assume a fixed history depth. On the initial import let the provider
-    // return whatever history the Data v3 API/consent makes available; afterwards
-    // sync incrementally from the persisted checkpoint (with a small overlap).
+    // return whatever history the provider/consent makes available; afterwards sync
+    // incrementally from the persisted checkpoint (with a small overlap).
     const fromIso = opts.historical || !conn.lastSuccessfulSyncAt
       ? undefined
       : new Date(conn.lastSuccessfulSyncAt.getTime() - SYNC_OVERLAP_MS).toISOString();
 
     for (const pAcc of providerAccounts) {
-      const accountId = await linkOrCreateAccount(userId, conn, pAcc);
+      const accountId = await linkOrCreateAccount(userId, conn, pAcc, hasBalances);
       summary.accountsLinked++;
 
-      // Authoritative balance (overwrites — never sums history).
-      const balance = await provider.getBalances(secret, pAcc.providerAccountId);
-      await prisma.$transaction((tx) => setProviderBalance(tx, accountId, balance.currentMinor, balance.availableMinor));
+      // Authoritative balance (overwrites — never sums history), when supported.
+      if (hasBalances) {
+        const balance = await provider.getBalances(secret, pAcc.providerAccountId);
+        await prisma.$transaction((tx) => setProviderBalance(tx, accountId, balance.currentMinor, balance.availableMinor));
+      }
 
-      const account = { id: accountId, currency: pAcc.currency, balanceAuthority: "PROVIDER" as const };
+      if (!hasTransactions) continue;
+      const account = { id: accountId, currency: pAcc.currency, balanceAuthority: hasBalances ? ("PROVIDER" as const) : ("LEDGER" as const) };
       const txns = await provider.getTransactions(secret, pAcc.providerAccountId, { fromIso });
       for (const ptxn of txns) {
         const outcome: ReconResult = (

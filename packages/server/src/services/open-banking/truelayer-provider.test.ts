@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TrueLayerDataV3Provider, ReauthRequiredError } from "./truelayer-provider.js";
+import { UnsupportedOperationError } from "./provider.js";
 
-// Contract tests for the REAL Data v3 HTTP adapter, exercised against mocked v3
-// fixtures (no TrueLayer credentials). These prove request shape, headers,
-// pagination and error handling of TrueLayerDataV3Provider itself.
+// Contract tests for the REAL Data API v3 HTTP adapter, exercised against mocked
+// fixtures that mirror the official Data v3 reference shapes (create-connection,
+// data-connections/{id}, connected-accounts). No TrueLayer credentials required.
 
 const cfg = {
   clientId: "cid",
@@ -31,7 +32,6 @@ function res(status: number, body: unknown, headers: Record<string, string> = {}
   } as unknown as Response;
 }
 
-/** Install a fetch mock that routes by URL, tracking a per-URL call counter. */
 function mockFetch(handler: (url: string, init: RequestInit, n: number) => Response | Promise<Response> | never) {
   const counts = new Map<string, number>();
   vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
@@ -43,7 +43,7 @@ function mockFetch(handler: (url: string, init: RequestInit, n: number) => Respo
   }));
 }
 const tokenBody = { access_token: "tok-abc", expires_in: 3600 };
-function withToken(url: string, onData: (url: string, init: RequestInit, n: number) => Response | Promise<Response>) {
+function withToken(onData: (url: string, init: RequestInit, n: number) => Response | Promise<Response>) {
   return (u: string, init: RequestInit, n: number) => (u.endsWith("/connect/token") ? res(200, tokenBody) : onData(u, init, n));
 }
 
@@ -53,106 +53,124 @@ afterEach(() => {
 });
 
 describe("TrueLayerDataV3Provider (Data v3 contract)", () => {
-  it("uses a client-credentials data token and creates a data-connection", async () => {
-    mockFetch(withToken("", (u) => res(200, { id: "conn-1", authorization_uri: "https://auth.tl/hosted?x=1" })));
+  it("reports only ACCOUNTS/ACCOUNT_HOLDER_NAMES (v3 has no balance/transactions)", () => {
     const p = new TrueLayerDataV3Provider(cfg);
-    const out = await p.createConnection({ userId: "u", connectionId: "c", state: "NONCE", returnUri: cfg.returnUri });
+    const caps = p.capabilities();
+    expect(caps.has("ACCOUNTS")).toBe(true);
+    expect(caps.has("ACCOUNT_HOLDER_NAMES")).toBe(true);
+    expect(caps.has("BALANCES")).toBe(false);
+    expect(caps.has("TRANSACTIONS")).toBe(false);
+    expect(p.supportsDirectDebitMandates()).toBe(false);
+  });
+
+  it("uses a client-credentials data token and creates a data-connection with the official body", async () => {
+    // Official create-connection response: { id, status, hosted_page: { uri } }.
+    mockFetch(withToken(() => res(201, { id: "conn-1", status: "authorization_required", hosted_page: { uri: "https://auth.tl/hosted/abc" } })));
+    const p = new TrueLayerDataV3Provider(cfg);
+    const out = await p.createConnection({ userId: "u1", connectionId: "c", state: "NONCE", returnUri: cfg.returnUri, user: { id: "u1", name: "S Saeed", email: "s@example.com" } });
     expect(out.providerConnectionId).toBe("conn-1");
-    expect(out.authorizationUrl).toBe("https://auth.tl/hosted?x=1");
+    expect(out.authorizationUrl).toBe("https://auth.tl/hosted/abc");
 
     const token = calls.find((c) => c.url.endsWith("/connect/token"))!;
     expect(String(token.init.body)).toContain("grant_type=client_credentials");
     expect(String(token.init.body)).toContain("scope=data");
+
     const create = calls.find((c) => c.url.endsWith("/v3/data-connections"))!;
-    expect(create.init.method).toBe("POST");
-    expect(String(create.init.body)).toContain("?state=NONCE"); // our nonce rides our return URI
-    expect(String(create.init.body)).toContain("accounts");
+    const sent = JSON.parse(String(create.init.body));
+    expect(sent.provider_selection).toEqual({ type: "user_selected" });
+    expect(sent.user_consent).toEqual({ type: "authorization_flow_captured" });
+    expect(sent.user.email).toBe("s@example.com");
+    expect(sent.hosted_page.type).toBe("authorization_flow");
+    expect(sent.hosted_page.return_uri).toContain("?state=NONCE"); // our nonce rides our return_uri
+    expect(sent.data_access_type).toBe("recurring");
+    expect(sent.scopes).toEqual(["accounts", "balance", "transactions"]);
     // No Data v1 anywhere.
     expect(calls.every((c) => !c.url.includes("/data/v1/"))).toBe(true);
   });
 
-  it("lists connected accounts with the Connection-Id header and masks identifiers", async () => {
-    mockFetch(withToken("", () => res(200, {
-      results: [{
-        account_id: "a1", account_type: "TRANSACTION", display_name: "Current", currency: "GBP",
-        account_holder_name: "Sardar Saeed",
-        account_identifiers: [{ type: "sort_code_account_number", account_number: "12345678", sort_code: "040004" }, { type: "iban", iban: "GB00BANK12345678" }],
-        provider: { display_name: "Monzo", provider_id: "monzo" },
-      }],
-    })));
+  it("resolves a connection's status via GET /v3/data-connections/{id}", async () => {
+    mockFetch(withToken(() => res(200, { status: "authorized", provider: { display_name: "Monzo", provider_id: "monzo" } })));
+    const p = new TrueLayerDataV3Provider(cfg);
+    const resolved = await p.resolveConnection(secret);
+    expect(resolved.status).toBe("ACTIVE");
+    expect(resolved.institutionName).toBe("Monzo");
+    expect(calls.some((c) => c.url.endsWith("/v3/data-connections/conn-1"))).toBe(true);
+  });
+
+  it("lists connected accounts (items + pagination) with the Connection-Id header and masks identifiers", async () => {
+    mockFetch(withToken((u) => {
+      if (u.includes("cursor=CUR2")) {
+        return res(200, { items: [{ id: "a2", type: "account", currency: "GBP", account_holder_names: ["Sardar Saeed"], account_identifiers: [{ type: "iban", iban: "GB00BANK99998888" }] }], pagination: {} });
+      }
+      return res(200, {
+        items: [{
+          id: "a1", type: "account", account_type: "current", currency: "GBP",
+          account_holder_names: ["Sardar Saeed"],
+          account_identifiers: [{ type: "sort_code_account_number", account_number: "12345678", sort_code: "040004" }],
+          provider: { display_name: "Monzo", provider_id: "monzo" },
+        }],
+        pagination: { next_cursor: "CUR2" },
+      });
+    }));
     const p = new TrueLayerDataV3Provider(cfg);
     const accounts = await p.listAccounts(secret);
     const call = calls.find((c) => c.url.endsWith("/v3/connected-accounts"))!;
     expect(call.url).toBe("https://api.tl/v3/connected-accounts");
     expect((call.init.headers as Record<string, string>)["Connection-Id"]).toBe("conn-1");
-    expect(accounts[0].maskedAccountNumber).toBe("••••5678");
-    expect(accounts[0].maskedIban).toContain("••••");
+    expect(accounts.map((a) => a.providerAccountId)).toEqual(["a1", "a2"]); // paged via next_cursor
     expect(accounts[0].accountHolderName).toBe("Sardar Saeed");
+    expect(accounts[0].maskedAccountNumber).toBe("••••5678");
     expect(accounts[0].maskedAccountNumber).not.toContain("12345678");
+    expect(accounts[1].maskedIban).toContain("••••");
   });
 
-  it("reads a balance from the v3 connected-account endpoint", async () => {
-    mockFetch(withToken("", () => res(200, { results: [{ currency: "GBP", current: 1000.5, available: 900.25 }] })));
+  it("does not call Data v1 for balances or transactions — reports them unsupported", async () => {
+    mockFetch(withToken(() => res(200, {})));
     const p = new TrueLayerDataV3Provider(cfg);
-    const b = await p.getBalances(secret, "a1");
-    expect(calls.find((c) => c.url.includes("/v3/connected-accounts/a1/balance"))).toBeTruthy();
-    expect(b.currentMinor).toBe(100050);
-    expect(b.availableMinor).toBe(90025);
-  });
-
-  it("pages transactions via the cursor until exhausted", async () => {
-    mockFetch(withToken("", (u) => {
-      const page2 = u.includes("cursor=CUR2");
-      if (page2) return res(200, { results: [{ transaction_id: "t2", timestamp: "2026-06-02T09:00:00Z", amount: 2000, currency: "GBP", transaction_type: "CREDIT", description: "SALARY" }] });
-      return res(200, { results: [{ transaction_id: "t1", timestamp: "2026-06-01T09:00:00Z", amount: -50, currency: "GBP", transaction_type: "DEBIT", merchant_name: "Tesco" }], next_cursor: "CUR2" });
-    }));
-    const p = new TrueLayerDataV3Provider(cfg);
-    const txns = await p.getTransactions(secret, "a1", { fromIso: "2026-01-01T00:00:00Z" });
-    expect(txns.map((t) => t.providerTransactionId)).toEqual(["t1", "t2"]);
-    expect(txns[0].direction).toBe("EXPENSE");
-    expect(txns[1].direction).toBe("INCOME");
-    expect(calls.some((c) => c.url.includes("cursor=CUR2"))).toBe(true);
+    await expect(p.getBalances(secret, "a1")).rejects.toBeInstanceOf(UnsupportedOperationError);
+    await expect(p.getTransactions(secret, "a1")).rejects.toBeInstanceOf(UnsupportedOperationError);
+    // No HTTP requests were made for these operations.
+    expect(calls.length).toBe(0);
   });
 
   it("refreshes the token and retries once on 401", async () => {
-    mockFetch(withToken("", (u, _i, n) => (n === 1 ? res(401, {}) : res(200, { results: [] }))));
+    mockFetch(withToken((u, _i, n) => (n === 1 ? res(401, {}) : res(200, { items: [] }))));
     const p = new TrueLayerDataV3Provider(cfg);
     await p.listAccounts(secret);
-    expect(calls.filter((c) => c.url.endsWith("/connect/token")).length).toBe(2); // refreshed
-    expect(calls.filter((c) => c.url.endsWith("/v3/connected-accounts")).length).toBe(2); // retried
+    expect(calls.filter((c) => c.url.endsWith("/connect/token")).length).toBe(2);
+    expect(calls.filter((c) => c.url.endsWith("/v3/connected-accounts")).length).toBe(2);
   });
 
-  it("maps 403 to a reauthorization-required error", async () => {
-    mockFetch(withToken("", () => res(403, {})));
+  it("maps 403 to a reauthorization-required error / state", async () => {
+    mockFetch(withToken(() => res(403, {})));
     const p = new TrueLayerDataV3Provider(cfg);
     await expect(p.listAccounts(secret)).rejects.toBeInstanceOf(ReauthRequiredError);
-    // getConnectionStatus turns it into a lifecycle state.
-    mockFetch(withToken("", () => res(403, {})));
+    mockFetch(withToken(() => res(403, {})));
     expect(await p.getConnectionStatus(secret)).toBe("REAUTH_REQUIRED");
   });
 
   it("retries on 429 and then succeeds", async () => {
-    mockFetch(withToken("", (u, _i, n) => (n === 1 ? res(429, {}, { "retry-after": "0" }) : res(200, { results: [] }))));
+    mockFetch(withToken((u, _i, n) => (n === 1 ? res(429, {}, { "retry-after": "0" }) : res(200, { items: [] }))));
     const p = new TrueLayerDataV3Provider(cfg);
     await p.listAccounts(secret);
     expect(calls.filter((c) => c.url.endsWith("/v3/connected-accounts")).length).toBe(2);
   });
 
   it("fails after exhausting retries on 5xx", async () => {
-    mockFetch(withToken("", () => res(503, {})));
+    mockFetch(withToken(() => res(503, {})));
     const p = new TrueLayerDataV3Provider(cfg);
     await expect(p.listAccounts(secret)).rejects.toThrow(/failed/i);
-    expect(calls.filter((c) => c.url.endsWith("/v3/connected-accounts")).length).toBe(3); // initial + 2 retries
+    expect(calls.filter((c) => c.url.endsWith("/v3/connected-accounts")).length).toBe(3);
   });
 
   it("rejects a malformed provider response", async () => {
-    mockFetch(withToken("", () => res(200, MALFORMED)));
+    mockFetch(withToken(() => res(200, MALFORMED)));
     const p = new TrueLayerDataV3Provider(cfg);
     await expect(p.listAccounts(secret)).rejects.toThrow(/malformed/i);
   });
 
   it("surfaces a timeout as a sanitised error", async () => {
-    mockFetch(withToken("", () => { const e = new Error("aborted"); e.name = "AbortError"; throw e; }));
+    mockFetch(withToken(() => { const e = new Error("aborted"); e.name = "AbortError"; throw e; }));
     const p = new TrueLayerDataV3Provider(cfg);
     await expect(p.listAccounts(secret)).rejects.toThrow(/timeout/i);
   });

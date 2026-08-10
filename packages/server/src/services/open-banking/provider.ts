@@ -53,11 +53,29 @@ export interface ProviderTransaction {
   rawPayloadHash?: string | null;
 }
 
+// End-user details TrueLayer Data v3 requires when creating a data connection
+// (name + email or phone). Sent to the provider only to establish the connection.
+export interface ProviderUser {
+  id?: string;
+  name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+}
+
 export interface StartConnectionInput {
   userId: string;
   connectionId: string; // our BankConnection id
   state: string; // one-time application CSRF nonce (NOT a provider OAuth state)
   returnUri: string;
+  user?: ProviderUser;
+}
+
+/** Thrown when a provider does not implement a BankDataProvider capability. */
+export class UnsupportedOperationError extends Error {
+  constructor(operation: string) {
+    super(`Operation not supported by this provider: ${operation}`);
+    this.name = "UnsupportedOperationError";
+  }
 }
 
 export interface StartConnectionResult {
