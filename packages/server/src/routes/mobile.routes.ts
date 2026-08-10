@@ -33,6 +33,8 @@ import { txnCorrectionSchema, ddUpdateSchema, ddMergeSchema } from "@direct-bank
 import {
   startConnection,
   handleCallback,
+  completeConnectionWithPublicToken,
+  handleProviderWebhook,
   reauthorize,
   revokeConnection,
   syncConnection,
@@ -538,6 +540,42 @@ mobileRouter.get(
     if (!result) throw new HttpError(400, "Invalid or expired authorization state");
     // Minimal success page; a production app deep-links back into the client.
     res.status(200).type("html").send("<!doctype html><meta charset=utf-8><title>Bank connected</title><body>Bank connected. You can return to Direct Banking.</body>");
+  }),
+);
+
+// Complete a link-token connection (Plaid): the client sends the public_token it
+// received from Plaid Link; the server exchanges it and starts importing.
+mobileRouter.post(
+  "/bank-connections/:id/complete",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    requireOpenBanking();
+    const userId = req.mobileAuth!.userId;
+    const publicToken = typeof req.body?.publicToken === "string" ? req.body.publicToken : "";
+    if (!publicToken) throw new HttpError(400, "A public token is required");
+    await connectionOr404(userId, req.params.id);
+    const result = await completeConnectionWithPublicToken(userId, req.params.id, publicToken);
+    if (!result.ok) throw new HttpError(result.code === "NOT_FOUND" ? 404 : 400, "Could not complete the connection", { code: result.code });
+    res.json({ ok: true });
+  }),
+);
+
+// Provider webhook (Plaid). Not mobile-authenticated — authenticity comes from the
+// signed Plaid-Verification JWT (when configured); the body is never trusted as
+// transaction data, only as a trigger for an idempotent sync.
+mobileRouter.post(
+  "/bank-connections/webhook",
+  asyncHandler(async (req, res) => {
+    const provider = getProvider();
+    const jwt = req.header("plaid-verification");
+    if (provider && typeof (provider as { verifyWebhook?: unknown }).verifyWebhook === "function" && jwt) {
+      const raw = (req as unknown as { rawBody?: string }).rawBody ?? JSON.stringify(req.body ?? {});
+      const ok = await (provider as unknown as { verifyWebhook: (b: string, j: string) => Promise<boolean> }).verifyWebhook(raw, jwt);
+      if (!ok) throw new HttpError(403, "Invalid webhook signature");
+    }
+    const body = (req.body ?? {}) as { webhook_type?: string; webhook_code?: string; item_id?: string };
+    if (body.item_id && body.webhook_code) await handleProviderWebhook(body.item_id, body.webhook_code);
+    res.json({ ok: true });
   }),
 );
 

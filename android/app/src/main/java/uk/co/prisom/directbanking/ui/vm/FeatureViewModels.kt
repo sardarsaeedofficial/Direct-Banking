@@ -352,10 +352,16 @@ class DirectDebitDetailViewModel(private val repo: DirectDebitRepository, privat
     }
 }
 
+/** How the client should complete a connection journey. */
+sealed interface ConnectAction {
+    data class OpenBrowser(val url: String) : ConnectAction // hosted_url providers (TrueLayer)
+    data class LaunchPlaid(val connectionId: String, val linkToken: String) : ConnectAction // link_token providers (Plaid)
+}
+
 class BankConnectionsViewModel(private val repo: uk.co.prisom.directbanking.data.repository.BankConnectionRepository) : ViewModel() {
     private val _state = MutableStateFlow<Async<List<uk.co.prisom.directbanking.data.remote.dto.BankConnectionDto>>>(Async.Loading)
     val state = _state.asStateFlow()
-    val authUrl = MutableStateFlow<String?>(null)
+    val action = MutableStateFlow<ConnectAction?>(null)
     val starting = MutableStateFlow(false)
 
     init { refresh() }
@@ -366,13 +372,21 @@ class BankConnectionsViewModel(private val repo: uk.co.prisom.directbanking.data
             .fold({ Async.Success(it) }, { Async.Failure(errorText(it)) })
     }
 
-    /** Begin a connection; emits the authorization URL for the UI to open in a browser. */
+    /** Begin a connection; emit the provider-specific completion action. */
     fun connectAnother() = viewModelScope.launch {
         starting.value = true
-        runCatching { repo.start() }.onSuccess { (_, url) -> authUrl.value = url }
+        runCatching { repo.start() }.onSuccess { r ->
+            action.value = if (r.mode == "link_token" && r.linkToken != null) ConnectAction.LaunchPlaid(r.connectionId, r.linkToken)
+            else r.authorizationUrl?.let { ConnectAction.OpenBrowser(it) }
+        }
         starting.value = false
     }
-    fun consumedAuthUrl() { authUrl.value = null }
+
+    /** Finish a Plaid Link journey by exchanging the public token, then refresh. */
+    fun completePlaid(connectionId: String, publicToken: String) = viewModelScope.launch {
+        runCatching { repo.complete(connectionId, publicToken) }.onSuccess { refresh() }
+    }
+    fun consumedAction() { action.value = null }
 }
 
 class BankConnectionDetailViewModel(
@@ -381,7 +395,7 @@ class BankConnectionDetailViewModel(
 ) : ViewModel() {
     private val _state = MutableStateFlow<Async<uk.co.prisom.directbanking.data.remote.dto.BankConnectionDetailResponse>>(Async.Loading)
     val state = _state.asStateFlow()
-    val authUrl = MutableStateFlow<String?>(null)
+    val action = MutableStateFlow<ConnectAction?>(null)
     val message = MutableStateFlow<String?>(null)
 
     init { load() }
@@ -396,10 +410,16 @@ class BankConnectionDetailViewModel(
             .onFailure { message.value = "Sync failed — will retry later" }
     }
     fun reconnect() = viewModelScope.launch {
-        runCatching { repo.reauthorize(connectionId) }.onSuccess { authUrl.value = it }
+        runCatching { repo.reauthorize(connectionId) }.onSuccess { r ->
+            action.value = if (r.mode == "link_token" && r.linkToken != null) ConnectAction.LaunchPlaid(r.connectionId, r.linkToken)
+            else r.authorizationUrl?.let { ConnectAction.OpenBrowser(it) }
+        }
+    }
+    fun completePlaid(publicToken: String) = viewModelScope.launch {
+        runCatching { repo.complete(connectionId, publicToken) }.onSuccess { load() }
     }
     fun disconnect(onDone: () -> Unit) = viewModelScope.launch {
         runCatching { repo.disconnect(connectionId) }.onSuccess { onDone() }
     }
-    fun consumedAuthUrl() { authUrl.value = null }
+    fun consumedAction() { action.value = null }
 }

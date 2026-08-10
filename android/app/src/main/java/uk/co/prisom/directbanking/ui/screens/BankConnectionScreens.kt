@@ -2,6 +2,7 @@ package uk.co.prisom.directbanking.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -24,12 +25,18 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.plaid.link.OpenPlaidLink
+import com.plaid.link.configuration.LinkTokenConfiguration
+import com.plaid.link.result.LinkSuccess
 import uk.co.prisom.directbanking.data.remote.dto.BankConnectionDto
 import uk.co.prisom.directbanking.data.remote.dto.ConnectedAccountDto
 import uk.co.prisom.directbanking.ui.EmptyState
@@ -39,15 +46,34 @@ import uk.co.prisom.directbanking.ui.money
 import uk.co.prisom.directbanking.ui.vm.Async
 import uk.co.prisom.directbanking.ui.vm.BankConnectionDetailViewModel
 import uk.co.prisom.directbanking.ui.vm.BankConnectionsViewModel
+import uk.co.prisom.directbanking.ui.vm.ConnectAction
 
-/** Opens the provider's hosted authorization journey in the system browser (never an embedded/imitated login). */
+/**
+ * Runs the provider-specific completion journey: hosted providers (TrueLayer) open
+ * in the system browser (never an embedded/imitated login); link-token providers
+ * (Plaid) launch the official Plaid Link SDK and return a public token.
+ */
 @Composable
-private fun LaunchAuthOnUrl(url: String?, onConsumed: () -> Unit) {
+private fun HandleConnectAction(action: ConnectAction?, onConsumed: () -> Unit, onPlaidSuccess: (connectionId: String, publicToken: String) -> Unit) {
     val context = LocalContext.current
-    LaunchedEffect(url) {
-        url?.let {
-            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            onConsumed()
+    var pendingConnectionId by remember { mutableStateOf<String?>(null) }
+    val plaidLauncher = rememberLauncherForActivityResult(OpenPlaidLink()) { result ->
+        val cid = pendingConnectionId
+        if (result is LinkSuccess && cid != null) onPlaidSuccess(cid, result.publicToken)
+        pendingConnectionId = null
+    }
+    LaunchedEffect(action) {
+        when (val a = action) {
+            is ConnectAction.OpenBrowser -> {
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(a.url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                onConsumed()
+            }
+            is ConnectAction.LaunchPlaid -> {
+                pendingConnectionId = a.connectionId
+                plaidLauncher.launch(LinkTokenConfiguration.Builder().token(a.linkToken).build())
+                onConsumed()
+            }
+            null -> Unit
         }
     }
 }
@@ -55,9 +81,9 @@ private fun LaunchAuthOnUrl(url: String?, onConsumed: () -> Unit) {
 @Composable
 fun BankConnectionsScreen(vm: BankConnectionsViewModel, onOpen: (String) -> Unit) {
     val state by vm.state.collectAsStateWithLifecycle()
-    val authUrl by vm.authUrl.collectAsStateWithLifecycle()
+    val action by vm.action.collectAsStateWithLifecycle()
     val starting by vm.starting.collectAsStateWithLifecycle()
-    LaunchAuthOnUrl(authUrl) { vm.consumedAuthUrl() }
+    HandleConnectAction(action, onConsumed = { vm.consumedAction() }, onPlaidSuccess = { cid, pub -> vm.completePlaid(cid, pub) })
 
     Column(Modifier.fillMaxSize()) {
         Text("Bank connections", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(16.dp))
@@ -103,9 +129,9 @@ private fun ConnectionRow(c: BankConnectionDto, onClick: () -> Unit) {
 @Composable
 fun BankConnectionDetailScreen(vm: BankConnectionDetailViewModel, onDisconnected: () -> Unit) {
     val state by vm.state.collectAsStateWithLifecycle()
-    val authUrl by vm.authUrl.collectAsStateWithLifecycle()
+    val action by vm.action.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
-    LaunchAuthOnUrl(authUrl) { vm.consumedAuthUrl() }
+    HandleConnectAction(action, onConsumed = { vm.consumedAction() }, onPlaidSuccess = { _, pub -> vm.completePlaid(pub) })
 
     when (val s = state) {
         is Async.Loading -> LoadingBox()

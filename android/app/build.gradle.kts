@@ -122,6 +122,9 @@ dependencies {
     implementation(libs.androidx.security.crypto)
     implementation(libs.androidx.datastore.preferences)
 
+    // Plaid Link — launches the bank authorization journey for Plaid-backed connections.
+    implementation(libs.plaid.link)
+
     testImplementation(libs.junit)
     testImplementation(libs.mockk)
     testImplementation(libs.turbine)

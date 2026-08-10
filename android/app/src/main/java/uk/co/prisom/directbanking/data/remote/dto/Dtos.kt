@@ -220,12 +220,29 @@ data class ConnectedAccountDto(
     val balanceAuthority: String = "LEDGER",
 )
 
-@Serializable data class StartConnectionResponse(val connectionId: String, val authorizationUrl: String)
+@Serializable
+data class StartConnectionResponse(
+    val connectionId: String,
+    val provider: String = "",
+    val mode: String = "hosted_url", // "hosted_url" (TrueLayer) | "link_token" (Plaid)
+    val authorizationUrl: String? = null,
+    val linkToken: String? = null,
+)
+
+@Serializable data class CompleteConnectionRequest(val publicToken: String)
+@Serializable data class OkResponse(val ok: Boolean = false)
 @Serializable data class BankConnectionListResponse(val items: List<BankConnectionDto> = emptyList())
 @Serializable data class BankConnectionDetailResponse(val connection: BankConnectionDto, val accounts: List<ConnectedAccountDto> = emptyList())
 @Serializable data class SyncSummaryDto(val accountsLinked: Int = 0, val imported: Int = 0, val matched: Int = 0, val duplicates: Int = 0)
 @Serializable data class SyncResponse(val ok: Boolean = false, val summary: SyncSummaryDto = SyncSummaryDto())
-@Serializable data class ReauthorizeResponse(val connectionId: String, val authorizationUrl: String)
+@Serializable
+data class ReauthorizeResponse(
+    val connectionId: String,
+    val provider: String = "",
+    val mode: String = "hosted_url",
+    val authorizationUrl: String? = null,
+    val linkToken: String? = null,
+)
 @Serializable data class RevokeResponse(val revoked: Boolean = false)
 
 @Serializable

@@ -5,7 +5,8 @@ import { setProviderBalance } from "../transactions.service.js";
 import { encryptJson, decryptJson } from "./crypto.js";
 import { getProvider } from "./registry.js";
 import type { BankDataProvider, ProviderAccount, ProviderConnectionSecret } from "./provider.js";
-import { reconcileProviderTransaction, type ReconResult } from "./reconciliation.service.js";
+import { reconcileProviderTransaction, removeProviderTransaction, type ReconResult } from "./reconciliation.service.js";
+import { SyncMutationError } from "./plaid-provider.js";
 
 const AUTH_STATE_TTL_MS = 10 * 60_000;
 const SYNC_OVERLAP_MS = 24 * 60 * 60_000;
@@ -40,21 +41,58 @@ export async function startConnection(userId: string, deviceId: string | null, r
       authDeviceId: deviceId,
     },
   });
-  // Data v3 requires end-user details (name + email/phone) to create the connection.
   const u = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, displayName: true } });
-  const { authorizationUrl, providerConnectionId } = await provider.createConnection({
+  const start = await provider.createConnection({
     userId,
     connectionId: conn.id,
     state,
     returnUri,
     user: { id: userId, name: u?.displayName ?? "Direct Banking user", email: u?.email ?? null },
   });
-  await prisma.bankConnection.update({
-    where: { id: conn.id },
-    // Store only the connection id — Data v3 needs no per-user access/refresh tokens.
-    data: { providerConnectionIdEncrypted: encryptJson({ providerConnectionId } satisfies ProviderConnectionSecret) },
-  });
-  return { connectionId: conn.id, authorizationUrl };
+  // Hosted providers (TrueLayer) already know their connection id — store it now.
+  // Link-token providers (Plaid) learn it only after the public-token exchange.
+  if (start.providerConnectionId) {
+    await prisma.bankConnection.update({
+      where: { id: conn.id },
+      data: { providerConnectionIdEncrypted: encryptJson({ providerConnectionId: start.providerConnectionId } satisfies ProviderConnectionSecret) },
+    });
+  }
+  return { connectionId: conn.id, provider: provider.name, mode: start.mode, authorizationUrl: start.authorizationUrl ?? null, linkToken: start.linkToken ?? null };
+}
+
+/**
+ * Complete a link-token connection (Plaid): exchange the client's public token for
+ * an access token, store it encrypted, activate the connection and start the
+ * initial import. Ownership-checked; the public token/secret never touch logs.
+ */
+export async function completeConnectionWithPublicToken(userId: string, connectionId: string, publicToken: string): Promise<{ ok: boolean; code?: string }> {
+  const provider = requireProvider();
+  if (!provider.exchangePublicToken) return { ok: false, code: "UNSUPPORTED" };
+  const conn = await prisma.bankConnection.findFirst({ where: { id: connectionId, userId } });
+  if (!conn) return { ok: false, code: "NOT_FOUND" };
+  if (conn.status === "REVOKED") return { ok: false, code: "REVOKED" };
+  try {
+    const result = await provider.exchangePublicToken(publicToken);
+    await prisma.bankConnection.update({
+      where: { id: conn.id },
+      data: {
+        providerConnectionIdEncrypted: encryptJson(result.secret),
+        providerItemId: result.providerItemId ?? null,
+        status: "ACTIVE",
+        institutionName: result.institutionName ?? conn.institutionName,
+        institutionProviderId: result.institutionProviderId ?? conn.institutionProviderId,
+        consentGrantedAt: new Date(),
+        consentExpiresAt: result.consentExpiresAt ? new Date(result.consentExpiresAt) : null,
+        authState: null,
+        authStateExpiresAt: null,
+      },
+    });
+    await syncConnection(userId, conn.id, { historical: true }).catch(() => undefined);
+    return { ok: true };
+  } catch {
+    await prisma.bankConnection.update({ where: { id: conn.id }, data: { status: "ERROR", lastErrorAt: new Date(), lastErrorCode: "EXCHANGE_FAILED" } });
+    return { ok: false, code: "EXCHANGE_FAILED" };
+  }
 }
 
 /**
@@ -106,14 +144,14 @@ export async function handleCallback(state: string): Promise<{ connectionId: str
   }
 }
 
-/** Re-run authorization: create a fresh Data v3 connection for the same row. */
+/** Re-run authorization: create a fresh connection start for the same row. */
 export async function reauthorize(userId: string, connectionId: string, deviceId: string | null, returnUri: string) {
   const provider = requireProvider();
   const conn = await prisma.bankConnection.findFirst({ where: { id: connectionId, userId } });
   if (!conn) return null;
   const state = randomBytes(24).toString("base64url");
   const u = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, displayName: true } });
-  const { authorizationUrl, providerConnectionId } = await provider.createConnection({
+  const start = await provider.createConnection({
     userId, connectionId: conn.id, state, returnUri,
     user: { id: userId, name: u?.displayName ?? "Direct Banking user", email: u?.email ?? null },
   });
@@ -124,10 +162,30 @@ export async function reauthorize(userId: string, connectionId: string, deviceId
       authState: state,
       authStateExpiresAt: new Date(Date.now() + AUTH_STATE_TTL_MS),
       authDeviceId: deviceId,
-      providerConnectionIdEncrypted: encryptJson({ providerConnectionId } satisfies ProviderConnectionSecret),
+      ...(start.providerConnectionId ? { providerConnectionIdEncrypted: encryptJson({ providerConnectionId: start.providerConnectionId } satisfies ProviderConnectionSecret) } : {}),
     },
   });
-  return { connectionId: conn.id, authorizationUrl };
+  return { connectionId: conn.id, provider: provider.name, mode: start.mode, authorizationUrl: start.authorizationUrl ?? null, linkToken: start.linkToken ?? null };
+}
+
+/**
+ * React to a provider webhook (Plaid). SYNC_UPDATES_AVAILABLE / account updates
+ * trigger an idempotent sync (we never trust the webhook body as transaction data).
+ * Item-attention codes flip the connection status. Duplicate deliveries are safe —
+ * the cursor sync imports nothing new.
+ */
+export async function handleProviderWebhook(itemId: string, webhookCode: string): Promise<void> {
+  const conn = await prisma.bankConnection.findFirst({ where: { providerItemId: itemId } });
+  if (!conn) return;
+  const syncCodes = ["SYNC_UPDATES_AVAILABLE", "NEW_ACCOUNTS_AVAILABLE", "DEFAULT_UPDATE", "INITIAL_UPDATE", "HISTORICAL_UPDATE"];
+  const attentionCodes = ["ERROR", "PENDING_EXPIRATION", "USER_PERMISSION_REVOKED"];
+  if (syncCodes.includes(webhookCode)) {
+    if (conn.status === "ACTIVE") await syncConnection(conn.userId, conn.id).catch(() => undefined);
+  } else if (webhookCode === "LOGIN_REPAIRED") {
+    await prisma.bankConnection.update({ where: { id: conn.id }, data: { status: "ACTIVE", lastErrorCode: null } });
+  } else if (attentionCodes.includes(webhookCode)) {
+    await prisma.bankConnection.update({ where: { id: conn.id }, data: { status: "REAUTH_REQUIRED", lastErrorAt: new Date(), lastErrorCode: webhookCode } });
+  }
 }
 
 export async function revokeConnection(userId: string, connectionId: string): Promise<boolean> {
@@ -206,6 +264,57 @@ export interface SyncSummary {
   duplicates: number;
 }
 
+type AccountLookup = (providerAccountId: string) => { id: string; currency: string; balanceAuthority: "PROVIDER" | "LEDGER" } | undefined;
+
+/**
+ * Incremental cursor sync (Plaid /transactions/sync). Starts from the persisted
+ * cursor; on a mid-pagination mutation error it restarts the whole loop from that
+ * starting cursor (re-processing is idempotent via the provider evidence unique
+ * key). The final cursor is persisted only once the batch completes.
+ */
+async function runCursorSync(
+  userId: string,
+  connectionId: string,
+  provider: BankDataProvider,
+  secret: ProviderConnectionSecret,
+  account: AccountLookup,
+  record: (o: ReconResult) => void,
+  ctx: { provider: string; providerConnectionId: string },
+): Promise<void> {
+  const startCursor = (await prisma.bankConnection.findUnique({ where: { id: connectionId }, select: { syncCursor: true } }))?.syncCursor ?? null;
+  let cursor = startCursor;
+  let hasMore = true;
+  let guard = 0;
+  while (hasMore && guard++ < 1000) {
+    let page;
+    try {
+      page = await provider.syncTransactions!(secret, cursor);
+    } catch (err) {
+      if (err instanceof SyncMutationError) {
+        cursor = startCursor; // restart from the first page's cursor
+        continue;
+      }
+      throw err;
+    }
+    // added + modified both flow through reconciliation (pending→settled converges,
+    // modified enriches the existing row).
+    for (const ptxn of [...page.added, ...page.modified]) {
+      const acc = account(ptxn.providerAccountId);
+      if (!acc) continue;
+      const outcome = (await prisma.$transaction((tx: Prisma.TransactionClient) => reconcileProviderTransaction(userId, acc, ptxn, ctx, tx))).result;
+      record(outcome);
+    }
+    // removed marks the canonical row as reversed — history is preserved, never erased.
+    for (const removedId of page.removed) {
+      await prisma.$transaction((tx: Prisma.TransactionClient) => removeProviderTransaction(ctx.provider, removedId, tx));
+    }
+    cursor = page.nextCursor;
+    hasMore = page.hasMore;
+  }
+  // Persist the final cursor only once the batch is complete.
+  await prisma.bankConnection.update({ where: { id: connectionId }, data: { syncCursor: cursor } });
+}
+
 /**
  * Refresh accounts, authoritative balances and transactions for a connection,
  * reconcile them into the canonical ledger, and update sync state. Idempotent:
@@ -238,28 +347,42 @@ export async function syncConnection(userId: string, connectionId: string, opts:
       ? undefined
       : new Date(conn.lastSuccessfulSyncAt.getTime() - SYNC_OVERLAP_MS).toISOString();
 
+    const accountByProvider = new Map<string, { id: string; currency: string; balanceAuthority: "PROVIDER" | "LEDGER" }>();
     for (const pAcc of providerAccounts) {
       const accountId = await linkOrCreateAccount(userId, conn, pAcc, hasBalances);
       summary.accountsLinked++;
+      accountByProvider.set(pAcc.providerAccountId, { id: accountId, currency: pAcc.currency, balanceAuthority: hasBalances ? "PROVIDER" : "LEDGER" });
 
       // Authoritative balance (overwrites — never sums history), when supported.
+      // Prefer the balance supplied alongside the account (e.g. Plaid /accounts/get).
       if (hasBalances) {
-        const balance = await provider.getBalances(secret, pAcc.providerAccountId);
+        const cached = pAcc.cachedBalanceMinor;
+        const balance = cached != null ? { currentMinor: cached, availableMinor: pAcc.cachedAvailableMinor ?? null } : await provider.getBalances(secret, pAcc.providerAccountId);
         await prisma.$transaction((tx) => setProviderBalance(tx, accountId, balance.currentMinor, balance.availableMinor));
       }
+    }
 
-      if (!hasTransactions) continue;
-      const account = { id: accountId, currency: pAcc.currency, balanceAuthority: hasBalances ? ("PROVIDER" as const) : ("LEDGER" as const) };
-      const txns = await provider.getTransactions(secret, pAcc.providerAccountId, { fromIso });
-      for (const ptxn of txns) {
-        const outcome: ReconResult = (
-          await prisma.$transaction((tx: Prisma.TransactionClient) =>
-            reconcileProviderTransaction(userId, account, ptxn, { provider: provider.name, providerConnectionId: conn.id }, tx),
-          )
-        ).result;
-        if (outcome === "DUPLICATE") summary.duplicates++;
-        else if (outcome === "HIGH_CONFIDENCE_MATCH" || outcome === "EXACT_MATCH") summary.matched++;
-        else summary.imported++;
+    const account = (providerAccountId: string) => accountByProvider.get(providerAccountId);
+    const record = (outcome: ReconResult) => {
+      if (outcome === "DUPLICATE") summary.duplicates++;
+      else if (outcome === "HIGH_CONFIDENCE_MATCH" || outcome === "EXACT_MATCH") summary.matched++;
+      else summary.imported++;
+    };
+    const ctx = { provider: provider.name, providerConnectionId: conn.id };
+
+    if (hasTransactions && provider.syncTransactions) {
+      // Item-level incremental cursor sync (Plaid /transactions/sync).
+      await runCursorSync(userId, conn.id, provider, secret, account, record, ctx);
+    } else if (hasTransactions && provider.getTransactions) {
+      // Per-account window fetch (fallback strategy).
+      for (const pAcc of providerAccounts) {
+        const acc = account(pAcc.providerAccountId);
+        if (!acc) continue;
+        const txns = await provider.getTransactions(secret, pAcc.providerAccountId, { fromIso });
+        for (const ptxn of txns) {
+          const outcome = (await prisma.$transaction((tx: Prisma.TransactionClient) => reconcileProviderTransaction(userId, acc, ptxn, ctx, tx))).result;
+          record(outcome);
+        }
       }
     }
 

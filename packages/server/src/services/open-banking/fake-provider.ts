@@ -39,6 +39,7 @@ export class FakeBankDataProvider implements BankDataProvider {
 
   async createConnection(input: StartConnectionInput): Promise<StartConnectionResult> {
     return {
+      mode: "hosted_url",
       authorizationUrl: `https://auth.example/authorize?state=${input.state}&connection=${input.connectionId}`,
       providerConnectionId: `conn-${input.connectionId}`,
     };

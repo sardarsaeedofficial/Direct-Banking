@@ -47,6 +47,11 @@ const schema = z.object({
   // 32-byte key (hex or base64) for AES-256-GCM encryption of connection material.
   OPEN_BANKING_DATA_KEY: z.string().optional(),
   BANK_SYNC_CRON: z.string().optional(),
+  // Plaid (fully transaction-capable provider). All optional so CI needs no secrets.
+  PLAID_ENV: z.enum(["sandbox", "production"]).default("sandbox"),
+  PLAID_CLIENT_ID: z.string().optional(),
+  PLAID_SECRET: z.string().optional(),
+  PLAID_WEBHOOK_URI: z.string().optional(),
 });
 
 const parsed = schema.safeParse(process.env);

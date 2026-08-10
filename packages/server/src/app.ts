@@ -34,7 +34,9 @@ export function createApp() {
   );
 
   app.use(cookieParser());
-  app.use(express.json({ limit: "6mb" }));
+  // Capture the raw body so provider webhooks (e.g. Plaid) can be signature-verified
+  // against the exact bytes received.
+  app.use(express.json({ limit: "6mb", verify: (req, _res, buf) => { (req as unknown as { rawBody?: string }).rawBody = buf.toString("utf8"); } }));
   app.use(attachSession);
 
   // API.

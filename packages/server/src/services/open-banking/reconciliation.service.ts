@@ -1,5 +1,5 @@
 import type { Prisma } from "@prisma/client";
-import { createTransaction } from "../transactions.service.js";
+import { createTransaction, reverseTransactionBalance } from "../transactions.service.js";
 import { detectAndPairInternalTransfer } from "../internal-transfer.service.js";
 import { detectDirectDebit } from "../direct-debit.service.js";
 import { normaliseMerchant } from "../merchant-normalise.service.js";
@@ -137,17 +137,58 @@ export async function reconcileProviderTransaction(
   const booked = new Date(ptxn.bookedAt);
   const settled = ptxn.status === "SETTLED";
 
-  // 1) Strong match — the provider transaction id is already known.
+  // 0) Plaid pending→settled: a settled transaction arrives with a new id that
+  // references the pending id. Migrate the existing canonical row + its evidence
+  // to the new id (one transaction), instead of creating a duplicate.
+  if (ptxn.pendingTransactionId) {
+    const pendingEv = await client.transactionEvidence.findUnique({
+      where: { provider_providerTransactionId: { provider, providerTransactionId: ptxn.pendingTransactionId } },
+      select: { id: true, transactionId: true },
+    });
+    if (pendingEv) {
+      const row = await client.transaction.findUnique({ where: { id: pendingEv.transactionId }, select: { balanceApplied: true } });
+      await client.transaction.update({
+        where: { id: pendingEv.transactionId },
+        data: {
+          status: settled ? "COMPLETED" : "PENDING",
+          settledAt: settled ? (ptxn.settledAt ? new Date(ptxn.settledAt) : booked) : undefined,
+          merchantName: ptxn.merchantName ?? undefined,
+          paymentReference: ptxn.reference ?? undefined,
+          // Amount may firm up on settlement; only safe to change when the balance
+          // was never applied to this row (provider-authoritative accounts).
+          amountMinor: row && !row.balanceApplied ? BigInt(ptxn.amountMinor) : undefined,
+        },
+      });
+      await client.transactionEvidence.update({ where: { id: pendingEv.id }, data: { providerTransactionId: ptxn.providerTransactionId, observedAt: new Date() } });
+      return { result: "EXACT_MATCH", transactionId: pendingEv.transactionId };
+    }
+  }
+
+  // 1) Strong match — the provider transaction id is already known (settle/enrich).
   const known = await client.transactionEvidence.findUnique({
     where: { provider_providerTransactionId: { provider, providerTransactionId: ptxn.providerTransactionId } },
     select: { transactionId: true },
   });
   if (known) {
-    const existing = await client.transaction.findUnique({ where: { id: known.transactionId }, select: { status: true } });
-    // Lifecycle update only (pending → settled); no new row.
-    if (existing && existing.status === "PENDING" && settled) {
-      await client.transaction.update({ where: { id: known.transactionId }, data: { status: "COMPLETED", settledAt: ptxn.settledAt ? new Date(ptxn.settledAt) : booked } });
-      return { result: "EXACT_MATCH", transactionId: known.transactionId };
+    const existing = await client.transaction.findUnique({ where: { id: known.transactionId }, select: { status: true, balanceApplied: true } });
+    if (existing) {
+      const changed =
+        (existing.status === "PENDING" && settled) ||
+        !!ptxn.merchantName ||
+        !!ptxn.reference;
+      if (changed) {
+        await client.transaction.update({
+          where: { id: known.transactionId },
+          data: {
+            status: settled ? "COMPLETED" : existing.status,
+            settledAt: settled ? (ptxn.settledAt ? new Date(ptxn.settledAt) : booked) : undefined,
+            merchantName: ptxn.merchantName ?? undefined,
+            paymentReference: ptxn.reference ?? undefined,
+            amountMinor: !existing.balanceApplied ? BigInt(ptxn.amountMinor) : undefined,
+          },
+        });
+        return { result: "EXACT_MATCH", transactionId: known.transactionId };
+      }
     }
     return { result: "DUPLICATE", transactionId: known.transactionId };
   }
@@ -227,4 +268,25 @@ export async function reconcileProviderTransaction(
 
   await runDetection(userId, created.id, account, ptxn, client);
   return { result: "NEW_TRANSACTION", transactionId: created.id };
+}
+
+/**
+ * Handle a provider "removed" transaction. History is preserved: the canonical row
+ * is marked CANCELLED (reversed) rather than deleted, and its balance effect is
+ * safely reversed only if it had been applied (never double-applied). The provider
+ * evidence is retained for audit.
+ */
+export async function removeProviderTransaction(provider: string, providerTransactionId: string, client: Prisma.TransactionClient): Promise<void> {
+  const ev = await client.transactionEvidence.findUnique({
+    where: { provider_providerTransactionId: { provider, providerTransactionId } },
+    select: { transactionId: true },
+  });
+  if (!ev) return;
+  const txn = await client.transaction.findUnique({
+    where: { id: ev.transactionId },
+    select: { accountId: true, direction: true, amountMinor: true, transferAccountId: true, balanceApplied: true, status: true },
+  });
+  if (!txn || txn.status === "CANCELLED") return;
+  await reverseTransactionBalance(client, txn); // no-op unless balanceApplied
+  await client.transaction.update({ where: { id: ev.transactionId }, data: { status: "CANCELLED", balanceApplied: false } });
 }

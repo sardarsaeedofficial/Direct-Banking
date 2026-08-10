@@ -17,6 +17,7 @@ securityCrypto = "1.1.0-alpha06"
 datastore = "1.1.1"
 coroutines = "1.9.0"
 splashscreen = "1.0.1"
+plaid = "5.1.1"
 
 junit = "4.13.2"
 mockk = "1.13.13"
@@ -40,6 +41,7 @@ androidx-material3 = { group = "androidx.compose.material3", name = "material3" 
 androidx-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }
 androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigationCompose" }
 androidx-splashscreen = { group = "androidx.core", name = "core-splashscreen", version.ref = "splashscreen" }
+plaid-link = { group = "com.plaid.link", name = "sdk-core", version.ref = "plaid" }
 
 retrofit = { group = "com.squareup.retrofit2", name = "retrofit", version.ref = "retrofit" }
 retrofit-kotlinx-serialization = { group = "com.squareup.retrofit2", name = "converter-kotlinx-serialization", version.ref = "retrofit" }

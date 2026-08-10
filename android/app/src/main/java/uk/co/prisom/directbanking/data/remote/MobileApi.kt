@@ -25,6 +25,8 @@ import uk.co.prisom.directbanking.data.remote.dto.RegisterRequest
 import uk.co.prisom.directbanking.data.remote.dto.TokenResponse
 import uk.co.prisom.directbanking.data.remote.dto.BankConnectionDetailResponse
 import uk.co.prisom.directbanking.data.remote.dto.BankConnectionListResponse
+import uk.co.prisom.directbanking.data.remote.dto.CompleteConnectionRequest
+import uk.co.prisom.directbanking.data.remote.dto.OkResponse
 import uk.co.prisom.directbanking.data.remote.dto.DdUpdateRequest
 import uk.co.prisom.directbanking.data.remote.dto.ReauthorizeResponse
 import uk.co.prisom.directbanking.data.remote.dto.RevokeResponse
@@ -97,6 +99,9 @@ interface MobileApi {
 
     @GET("api/mobile/v1/bank-connections/{id}")
     suspend fun bankConnection(@Path("id") id: String): BankConnectionDetailResponse
+
+    @POST("api/mobile/v1/bank-connections/{id}/complete")
+    suspend fun completeBankConnection(@Path("id") id: String, @Body body: CompleteConnectionRequest): OkResponse
 
     @POST("api/mobile/v1/bank-connections/{id}/sync")
     suspend fun syncBankConnection(@Path("id") id: String): SyncResponse

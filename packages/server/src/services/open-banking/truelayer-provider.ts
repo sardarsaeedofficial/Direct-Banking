@@ -175,7 +175,7 @@ export class TrueLayerDataV3Provider implements BankDataProvider {
     const providerConnectionId = body.id;
     const authorizationUrl = body.hosted_page?.uri;
     if (!providerConnectionId || !authorizationUrl) throw new Error("Malformed data-connection response");
-    return { authorizationUrl, providerConnectionId };
+    return { mode: "hosted_url", authorizationUrl, providerConnectionId };
   }
 
   private mapState(raw: string | undefined): ConnectionState {

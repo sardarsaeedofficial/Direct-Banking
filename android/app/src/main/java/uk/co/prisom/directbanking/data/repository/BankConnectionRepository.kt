@@ -5,6 +5,8 @@ import uk.co.prisom.directbanking.data.local.db.BankConnectionDao
 import uk.co.prisom.directbanking.data.remote.ApiClients
 import uk.co.prisom.directbanking.data.remote.dto.BankConnectionDetailResponse
 import uk.co.prisom.directbanking.data.remote.dto.BankConnectionDto
+import uk.co.prisom.directbanking.data.remote.dto.CompleteConnectionRequest
+import uk.co.prisom.directbanking.data.remote.dto.StartConnectionResponse
 import uk.co.prisom.directbanking.data.remote.dto.SyncSummaryDto
 
 /** Reads/edits Open Banking connections from the canonical backend, caching the list offline. */
@@ -26,15 +28,19 @@ class BankConnectionRepository(
 
     suspend fun detail(id: String): BankConnectionDetailResponse = clients.authApi.bankConnection(id)
 
-    /** Begin a connection; returns the hosted authorization URL to open in a browser. */
-    suspend fun start(): Pair<String, String> {
-        val r = clients.authApi.startBankConnection()
-        return r.connectionId to r.authorizationUrl
-    }
+    /** Begin a connection; the payload says how to complete it (hosted URL or link token). */
+    suspend fun start(): StartConnectionResponse = clients.authApi.startBankConnection()
+
+    /** Complete a link-token (Plaid) connection with the public token from the client SDK. */
+    suspend fun complete(id: String, publicToken: String): Boolean =
+        clients.authApi.completeBankConnection(id, CompleteConnectionRequest(publicToken)).ok
 
     suspend fun sync(id: String): SyncSummaryDto = clients.authApi.syncBankConnection(id).summary
 
-    suspend fun reauthorize(id: String): String = clients.authApi.reauthorizeBankConnection(id).authorizationUrl
+    /** Re-authorize; returns the payload (hosted URL or link token) to relaunch the journey. */
+    suspend fun reauthorize(id: String): StartConnectionResponse = clients.authApi.reauthorizeBankConnection(id).let {
+        StartConnectionResponse(it.connectionId, it.provider, it.mode, it.authorizationUrl, it.linkToken)
+    }
 
     suspend fun disconnect(id: String): Boolean = clients.authApi.deleteBankConnection(id).revoked
 }

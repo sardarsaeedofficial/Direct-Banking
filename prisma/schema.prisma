@@ -527,6 +527,11 @@ model BankConnection {
   institutionName       String?
   institutionProviderId String?
 
+  // Provider item identity (e.g. Plaid item_id — an identifier, not a secret) and
+  // the persisted incremental-sync cursor (e.g. Plaid /transactions/sync cursor).
+  providerItemId String?
+  syncCursor     String?
+
   consentGrantedAt     DateTime?
   consentExpiresAt     DateTime?
   lastSyncedAt         DateTime?

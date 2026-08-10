@@ -1,6 +1,7 @@
 import { env } from "../../env.js";
 import type { BankDataProvider } from "./provider.js";
 import { buildTrueLayerProvider } from "./truelayer-provider.js";
+import { buildPlaidProvider } from "./plaid-provider.js";
 
 // Resolves the active provider without coupling callers to a concrete class.
 // Tests inject a fake via setProviderForTests so CI needs no real credentials.
@@ -22,6 +23,15 @@ export function openBankingEnabled(): boolean {
 export function getProvider(): BankDataProvider | null {
   if (override) return override;
   if (cached) return cached;
+  if (env.OPEN_BANKING_PROVIDER === "plaid" && env.PLAID_CLIENT_ID && env.PLAID_SECRET) {
+    cached = buildPlaidProvider({
+      clientId: env.PLAID_CLIENT_ID,
+      secret: env.PLAID_SECRET,
+      env: env.PLAID_ENV,
+      webhookUri: env.PLAID_WEBHOOK_URI,
+    });
+    return cached;
+  }
   if (env.OPEN_BANKING_PROVIDER === "truelayer" && env.TRUELAYER_CLIENT_ID && env.TRUELAYER_CLIENT_SECRET && env.TRUELAYER_RETURN_URI) {
     cached = buildTrueLayerProvider({
       clientId: env.TRUELAYER_CLIENT_ID,

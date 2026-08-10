@@ -8,7 +8,8 @@ export type ProviderCapability =
   | "TRANSACTIONS"
   | "ACCOUNT_HOLDER_NAMES"
   | "DIRECT_DEBIT_MANDATES"
-  | "STANDING_ORDERS";
+  | "STANDING_ORDERS"
+  | "RECURRING_TRANSACTION_INSIGHTS";
 
 export interface ProviderAccount {
   providerAccountId: string;
@@ -25,6 +26,10 @@ export interface ProviderAccount {
   // Opaque provider identifier used ONLY internally to strengthen own-account
   // transfer detection (never exposed to the client or logs in full).
   ownershipKey?: string | null;
+  // Balance supplied alongside the account (e.g. Plaid /accounts/get), so a normal
+  // sync needs no extra balance call.
+  cachedBalanceMinor?: number | null;
+  cachedAvailableMinor?: number | null;
 }
 
 export interface ProviderBalance {
@@ -44,13 +49,34 @@ export interface ProviderTransaction {
   bookedAt: string; // ISO
   settledAt?: string | null;
   description?: string | null;
+  originalDescription?: string | null;
   merchantName?: string | null;
   senderName?: string | null;
   recipientName?: string | null;
   reference?: string | null;
   category?: string | null;
   isDirectDebit?: boolean;
+  // Plaid replaces a pending transaction with a new settled one that references
+  // the pending id here — used to converge pending→settled into one canonical row.
+  pendingTransactionId?: string | null;
   rawPayloadHash?: string | null;
+}
+
+// One page of an incremental cursor sync (Plaid /transactions/sync).
+export interface ProviderSyncPage {
+  added: ProviderTransaction[];
+  modified: ProviderTransaction[];
+  removed: string[]; // provider transaction ids
+  nextCursor: string;
+  hasMore: boolean;
+}
+
+export interface ExchangePublicTokenResult {
+  secret: ProviderConnectionSecret;
+  institutionName?: string | null;
+  institutionProviderId?: string | null;
+  providerItemId?: string | null;
+  consentExpiresAt?: string | null;
 }
 
 // End-user details TrueLayer Data v3 requires when creating a data connection
@@ -78,10 +104,17 @@ export class UnsupportedOperationError extends Error {
   }
 }
 
+export type ConnectionStartMode = "hosted_url" | "link_token";
+
 export interface StartConnectionResult {
-  authorizationUrl: string;
-  // TrueLayer Data v3 returns the connection id when the data-connection is created.
-  providerConnectionId: string;
+  // How the client completes the journey: a hosted browser URL (TrueLayer) or a
+  // link token the client SDK consumes (Plaid).
+  mode: ConnectionStartMode;
+  authorizationUrl?: string; // hosted_url providers
+  linkToken?: string; // link_token providers
+  // Known at creation for TrueLayer; for Plaid the connection id is only known
+  // after the public-token exchange.
+  providerConnectionId?: string;
 }
 
 // TrueLayer Data v3 does not persist per-user access/refresh tokens: data is read
@@ -112,12 +145,17 @@ export interface BankDataProvider {
   supportsDirectDebitMandates(): boolean;
 
   createConnection(input: StartConnectionInput): Promise<StartConnectionResult>;
-  // Verify/resolve the connection lifecycle state after the user returns from the
-  // hosted journey (Data v3 has no authorization-code exchange).
+  // hosted_url providers verify state after the browser returns; link_token
+  // providers exchange the client's public token for stored credentials.
   resolveConnection(secret: ProviderConnectionSecret): Promise<ResolveConnectionResult>;
+  exchangePublicToken?(publicToken: string): Promise<ExchangePublicTokenResult>;
   getConnectionStatus(secret: ProviderConnectionSecret): Promise<ConnectionState>;
   listAccounts(secret: ProviderConnectionSecret): Promise<ProviderAccount[]>;
   getBalances(secret: ProviderConnectionSecret, providerAccountId: string): Promise<ProviderBalance>;
-  getTransactions(secret: ProviderConnectionSecret, providerAccountId: string, opts?: GetTransactionsOptions): Promise<ProviderTransaction[]>;
+  // Window-based transaction fetch (per account). Optional — providers that only
+  // support incremental cursor sync implement syncTransactions instead.
+  getTransactions?(secret: ProviderConnectionSecret, providerAccountId: string, opts?: GetTransactionsOptions): Promise<ProviderTransaction[]>;
+  // Incremental cursor sync (Plaid /transactions/sync). Optional.
+  syncTransactions?(secret: ProviderConnectionSecret, cursor: string | null): Promise<ProviderSyncPage>;
   revokeConnection(secret: ProviderConnectionSecret): Promise<void>;
 }
