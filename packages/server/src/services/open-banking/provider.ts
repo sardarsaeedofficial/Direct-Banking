@@ -56,28 +56,27 @@ export interface ProviderTransaction {
 export interface StartConnectionInput {
   userId: string;
   connectionId: string; // our BankConnection id
-  state: string; // one-time CSRF nonce
+  state: string; // one-time application CSRF nonce (NOT a provider OAuth state)
   returnUri: string;
 }
 
 export interface StartConnectionResult {
   authorizationUrl: string;
+  // TrueLayer Data v3 returns the connection id when the data-connection is created.
+  providerConnectionId: string;
 }
 
-export interface ExchangeCallbackInput {
-  code: string;
-  connectionId: string;
-}
-
+// TrueLayer Data v3 does not persist per-user access/refresh tokens: data is read
+// with a SERVER client-credentials token plus the connection id, so the only
+// per-connection secret we store is the connection id itself.
 export interface ProviderConnectionSecret {
   providerConnectionId: string;
-  accessToken: string;
-  refreshToken?: string | null;
-  expiresAt?: string | null;
 }
 
-export interface ExchangeCallbackResult {
-  secret: ProviderConnectionSecret;
+export type ConnectionState = "ACTIVE" | "REAUTH_REQUIRED" | "EXPIRED" | "REVOKED" | "PENDING";
+
+export interface ResolveConnectionResult {
+  status: ConnectionState;
   institutionName?: string | null;
   institutionProviderId?: string | null;
   consentExpiresAt?: string | null;
@@ -95,8 +94,10 @@ export interface BankDataProvider {
   supportsDirectDebitMandates(): boolean;
 
   createConnection(input: StartConnectionInput): Promise<StartConnectionResult>;
-  exchangeCallback(input: ExchangeCallbackInput): Promise<ExchangeCallbackResult>;
-  getConnectionStatus(secret: ProviderConnectionSecret): Promise<"ACTIVE" | "REAUTH_REQUIRED" | "EXPIRED" | "REVOKED">;
+  // Verify/resolve the connection lifecycle state after the user returns from the
+  // hosted journey (Data v3 has no authorization-code exchange).
+  resolveConnection(secret: ProviderConnectionSecret): Promise<ResolveConnectionResult>;
+  getConnectionStatus(secret: ProviderConnectionSecret): Promise<ConnectionState>;
   listAccounts(secret: ProviderConnectionSecret): Promise<ProviderAccount[]>;
   getBalances(secret: ProviderConnectionSecret, providerAccountId: string): Promise<ProviderBalance>;
   getTransactions(secret: ProviderConnectionSecret, providerAccountId: string, opts?: GetTransactionsOptions): Promise<ProviderTransaction[]>;

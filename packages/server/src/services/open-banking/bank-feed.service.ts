@@ -9,7 +9,6 @@ import { reconcileProviderTransaction, type ReconResult } from "./reconciliation
 
 const AUTH_STATE_TTL_MS = 10 * 60_000;
 const SYNC_OVERLAP_MS = 24 * 60 * 60_000;
-const HISTORY_WINDOW_MS = 730 * 24 * 60 * 60_000; // ~2 years, subject to provider limits
 
 function requireProvider(): BankDataProvider {
   const p = getProvider();
@@ -22,7 +21,12 @@ function readSecret(conn: BankConnection): ProviderConnectionSecret {
   return decryptJson<ProviderConnectionSecret>(conn.providerConnectionIdEncrypted);
 }
 
-/** Begin a connection: create a PENDING row with a one-time state and the hosted auth URL. */
+/**
+ * Begin a Data v3 connection. Creates our BankConnection row, calls
+ * POST /v3/data-connections to obtain the connection id + hosted authorization
+ * URI, and stores the connection id (encrypted) immediately. Our one-time state
+ * nonce protects the user journey and is bound to this connection + device.
+ */
 export async function startConnection(userId: string, deviceId: string | null, returnUri: string) {
   const provider = requireProvider();
   const state = randomBytes(24).toString("base64url");
@@ -36,17 +40,23 @@ export async function startConnection(userId: string, deviceId: string | null, r
       authDeviceId: deviceId,
     },
   });
-  const { authorizationUrl } = await provider.createConnection({ userId, connectionId: conn.id, state, returnUri });
+  const { authorizationUrl, providerConnectionId } = await provider.createConnection({ userId, connectionId: conn.id, state, returnUri });
+  await prisma.bankConnection.update({
+    where: { id: conn.id },
+    // Store only the connection id — Data v3 needs no per-user access/refresh tokens.
+    data: { providerConnectionIdEncrypted: encryptJson({ providerConnectionId } satisfies ProviderConnectionSecret) },
+  });
   return { connectionId: conn.id, authorizationUrl };
 }
 
 /**
- * Handle the provider authorization callback. Validates the one-time state (bound
- * to a connection, unexpired, unconsumed), exchanges the code for tokens, stores
- * them encrypted, activates the connection and kicks off the initial import.
- * Returns null when the state is invalid/reused (never silently reconnect).
+ * Handle the provider return (Data v3 has no authorization-code exchange).
+ * Validates our one-time state (bound to a connection, unexpired, unconsumed),
+ * resolves the connection lifecycle state, and — when authorized — activates the
+ * connection and kicks off the initial import. Returns null when the state is
+ * invalid/reused (never silently reconnect).
  */
-export async function handleCallback(state: string, code: string): Promise<{ connectionId: string; userId: string } | null> {
+export async function handleCallback(state: string): Promise<{ connectionId: string; userId: string } | null> {
   const provider = requireProvider();
   const conn = await prisma.bankConnection.findUnique({ where: { authState: state } });
   if (!conn || !conn.authStateExpiresAt || conn.authStateExpiresAt < new Date()) return null;
@@ -58,39 +68,53 @@ export async function handleCallback(state: string, code: string): Promise<{ con
     data: { authState: null, authStateExpiresAt: null },
   });
   if (claim.count === 0) return null;
+  if (!conn.providerConnectionIdEncrypted) return null;
 
   try {
-    const result = await provider.exchangeCallback({ code, connectionId: conn.id });
+    const resolved = await provider.resolveConnection(readSecret(conn));
+    if (resolved.status !== "ACTIVE") {
+      await prisma.bankConnection.update({
+        where: { id: conn.id },
+        data: { status: resolved.status === "PENDING" ? "AUTHORIZATION_REQUIRED" : resolved.status, lastErrorAt: new Date(), lastErrorCode: "NOT_AUTHORIZED" },
+      });
+      return { connectionId: conn.id, userId: conn.userId };
+    }
     await prisma.bankConnection.update({
       where: { id: conn.id },
       data: {
-        providerConnectionIdEncrypted: encryptJson(result.secret),
         status: "ACTIVE",
-        institutionName: result.institutionName ?? conn.institutionName,
-        institutionProviderId: result.institutionProviderId ?? conn.institutionProviderId,
+        institutionName: resolved.institutionName ?? conn.institutionName,
+        institutionProviderId: resolved.institutionProviderId ?? conn.institutionProviderId,
         consentGrantedAt: new Date(),
-        consentExpiresAt: result.consentExpiresAt ? new Date(result.consentExpiresAt) : null,
+        consentExpiresAt: resolved.consentExpiresAt ? new Date(resolved.consentExpiresAt) : null,
       },
     });
     // Initial historical import (best-effort; failures leave the connection ACTIVE with an error stamp).
     await syncConnection(conn.userId, conn.id, { historical: true }).catch(() => undefined);
     return { connectionId: conn.id, userId: conn.userId };
   } catch {
-    await prisma.bankConnection.update({ where: { id: conn.id }, data: { status: "ERROR", lastErrorAt: new Date(), lastErrorCode: "TOKEN_EXCHANGE_FAILED" } });
+    await prisma.bankConnection.update({ where: { id: conn.id }, data: { status: "ERROR", lastErrorAt: new Date(), lastErrorCode: "RESOLVE_FAILED" } });
     return { connectionId: conn.id, userId: conn.userId };
   }
 }
 
+/** Re-run authorization: create a fresh Data v3 connection for the same row. */
 export async function reauthorize(userId: string, connectionId: string, deviceId: string | null, returnUri: string) {
   const provider = requireProvider();
   const conn = await prisma.bankConnection.findFirst({ where: { id: connectionId, userId } });
   if (!conn) return null;
   const state = randomBytes(24).toString("base64url");
+  const { authorizationUrl, providerConnectionId } = await provider.createConnection({ userId, connectionId: conn.id, state, returnUri });
   await prisma.bankConnection.update({
     where: { id: conn.id },
-    data: { status: "AUTHORIZATION_REQUIRED", authState: state, authStateExpiresAt: new Date(Date.now() + AUTH_STATE_TTL_MS), authDeviceId: deviceId },
+    data: {
+      status: "AUTHORIZATION_REQUIRED",
+      authState: state,
+      authStateExpiresAt: new Date(Date.now() + AUTH_STATE_TTL_MS),
+      authDeviceId: deviceId,
+      providerConnectionIdEncrypted: encryptJson({ providerConnectionId } satisfies ProviderConnectionSecret),
+    },
   });
-  const { authorizationUrl } = await provider.createConnection({ userId, connectionId: conn.id, state, returnUri });
   return { connectionId: conn.id, authorizationUrl };
 }
 
@@ -181,9 +205,12 @@ export async function syncConnection(userId: string, connectionId: string, opts:
   try {
     const secret = readSecret(conn);
     const providerAccounts = await provider.listAccounts(secret);
-    const fromIso = new Date(
-      opts.historical ? Date.now() - HISTORY_WINDOW_MS : (conn.lastSuccessfulSyncAt?.getTime() ?? Date.now() - HISTORY_WINDOW_MS) - SYNC_OVERLAP_MS,
-    ).toISOString();
+    // Do not assume a fixed history depth. On the initial import let the provider
+    // return whatever history the Data v3 API/consent makes available; afterwards
+    // sync incrementally from the persisted checkpoint (with a small overlap).
+    const fromIso = opts.historical || !conn.lastSuccessfulSyncAt
+      ? undefined
+      : new Date(conn.lastSuccessfulSyncAt.getTime() - SYNC_OVERLAP_MS).toISOString();
 
     for (const pAcc of providerAccounts) {
       const accountId = await linkOrCreateAccount(userId, conn, pAcc);

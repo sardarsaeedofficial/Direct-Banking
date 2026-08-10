@@ -1,13 +1,13 @@
 import type {
   BankDataProvider,
-  ExchangeCallbackInput,
-  ExchangeCallbackResult,
+  ConnectionState,
   GetTransactionsOptions,
   ProviderAccount,
   ProviderBalance,
   ProviderCapability,
   ProviderConnectionSecret,
   ProviderTransaction,
+  ResolveConnectionResult,
   StartConnectionInput,
   StartConnectionResult,
 } from "./provider.js";
@@ -22,8 +22,8 @@ export class FakeBankDataProvider implements BankDataProvider {
   private balances = new Map<string, ProviderBalance>();
   private txns = new Map<string, ProviderTransaction[]>();
   private ddMandates = false;
-  public lastCode: string | null = null;
   public failMode: null | "list" | "txns" = null;
+  private resolveState: ConnectionState = "ACTIVE";
 
   seedAccounts(accounts: ProviderAccount[]) { this.accounts = accounts; }
   seedBalance(b: ProviderBalance) { this.balances.set(b.providerAccountId, b); }
@@ -35,19 +35,23 @@ export class FakeBankDataProvider implements BankDataProvider {
   }
   supportsDirectDebitMandates(): boolean { return this.ddMandates; }
 
+  setResolveState(s: ConnectionState) { this.resolveState = s; }
+
   async createConnection(input: StartConnectionInput): Promise<StartConnectionResult> {
-    return { authorizationUrl: `https://auth.example/authorize?state=${input.state}&connection=${input.connectionId}` };
-  }
-  async exchangeCallback(input: ExchangeCallbackInput): Promise<ExchangeCallbackResult> {
-    this.lastCode = input.code;
     return {
-      secret: { providerConnectionId: `conn-${input.connectionId}`, accessToken: "fake-access", refreshToken: "fake-refresh", expiresAt: null },
+      authorizationUrl: `https://auth.example/authorize?state=${input.state}&connection=${input.connectionId}`,
+      providerConnectionId: `conn-${input.connectionId}`,
+    };
+  }
+  async resolveConnection(_secret: ProviderConnectionSecret): Promise<ResolveConnectionResult> {
+    return {
+      status: this.resolveState,
       institutionName: "Monzo",
       institutionProviderId: "monzo",
       consentExpiresAt: new Date(Date.now() + 90 * 86_400_000).toISOString(),
     };
   }
-  async getConnectionStatus(): Promise<"ACTIVE"> { return "ACTIVE"; }
+  async getConnectionStatus(): Promise<ConnectionState> { return this.resolveState; }
   async listAccounts(_secret: ProviderConnectionSecret): Promise<ProviderAccount[]> {
     if (this.failMode === "list") throw new Error("Provider unavailable");
     return this.accounts;

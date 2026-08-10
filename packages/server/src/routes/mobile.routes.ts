@@ -529,10 +529,12 @@ mobileRouter.get(
   "/bank-connections/callback",
   asyncHandler(async (req, res) => {
     requireOpenBanking();
+    // Data v3: the user returns to our HTTPS return URI carrying our one-time
+    // application state (no authorization code). We validate the state and then
+    // resolve the connection lifecycle with the provider.
     const state = typeof req.query.state === "string" ? req.query.state : "";
-    const code = typeof req.query.code === "string" ? req.query.code : "";
-    if (!state || !code) throw new HttpError(400, "Missing callback parameters");
-    const result = await handleCallback(state, code);
+    if (!state) throw new HttpError(400, "Missing callback state");
+    const result = await handleCallback(state);
     if (!result) throw new HttpError(400, "Invalid or expired authorization state");
     // Minimal success page; a production app deep-links back into the client.
     res.status(200).type("html").send("<!doctype html><meta charset=utf-8><title>Bank connected</title><body>Bank connected. You can return to Direct Banking.</body>");
