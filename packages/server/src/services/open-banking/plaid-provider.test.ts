@@ -5,7 +5,7 @@ import { PlaidProvider, ReauthRequiredError, SyncMutationError } from "./plaid-p
 // Contract tests for the REAL Plaid HTTP adapter, exercised against mocked fixtures
 // that mirror the official Plaid API shapes. No Plaid credentials required.
 
-const cfg = { clientId: "cid", secret: "csecret", apiBase: "https://plaid.test", countryCodes: ["GB"], recurringEnabled: false, webhookUri: "https://app/webhook" };
+const cfg = { clientId: "cid", secret: "csecret", apiBase: "https://plaid.test", countryCodes: ["GB"], recurringEnabled: false, webhookUri: "https://app/webhook", androidPackageName: "uk.co.prisom.directbanking" };
 const secret = { providerConnectionId: "access-1" };
 const MALFORMED = Symbol("malformed");
 interface Recorded { url: string; body: Record<string, unknown> }
@@ -44,6 +44,9 @@ describe("PlaidProvider (contract)", () => {
     expect(call.body.products).toEqual(["transactions"]);
     expect((call.body.user as { client_user_id: string }).client_user_id).toBe("u1");
     expect(call.body.webhook).toBe("https://app/webhook");
+    // Native Android: package name is sent; no redirect_uri.
+    expect(call.body.android_package_name).toBe("uk.co.prisom.directbanking");
+    expect(call.body.redirect_uri).toBeUndefined();
   });
 
   it("exchanges a public token for an access token + item id (never logged)", async () => {

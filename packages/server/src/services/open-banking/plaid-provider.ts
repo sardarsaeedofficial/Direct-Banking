@@ -50,6 +50,10 @@ interface PlaidConfig {
   webhookUri?: string;
   countryCodes: string[];
   recurringEnabled: boolean;
+  // Native Android: the app package must be allow-listed in the Plaid Dashboard
+  // (Developers → API → Allowed Android package names). We send it on Link creation
+  // and never send a redirect_uri for native Android.
+  androidPackageName: string;
 }
 
 function mask(value: string | null | undefined): string | null {
@@ -111,12 +115,14 @@ export class PlaidProvider implements BankDataProvider {
   }
 
   async createConnection(input: StartConnectionInput): Promise<StartConnectionResult> {
+    // Native Android Link: include android_package_name; never send redirect_uri.
     const body = await this.post<{ link_token: string }>("/link/token/create", {
       client_name: "Direct Banking",
       language: "en",
       country_codes: this.cfg.countryCodes,
       user: { client_user_id: input.userId },
       products: ["transactions"],
+      android_package_name: this.cfg.androidPackageName,
       ...(this.cfg.webhookUri ? { webhook: this.cfg.webhookUri } : {}),
     });
     if (!body.link_token) throw new Error("Malformed link token response");
@@ -264,5 +270,6 @@ export function buildPlaidProvider(cfg: {
     webhookUri: cfg.webhookUri,
     countryCodes: ["GB"],
     recurringEnabled: !!cfg.recurringEnabled,
+    androidPackageName: "uk.co.prisom.directbanking",
   });
 }

@@ -34,8 +34,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.activity.ComponentActivity
 import com.plaid.link.OpenPlaidLink
-import com.plaid.link.configuration.LinkTokenConfiguration
+import com.plaid.link.Plaid
+import com.plaid.link.configuration.linkTokenConfiguration
+import com.plaid.link.result.LinkExit
 import com.plaid.link.result.LinkSuccess
 import uk.co.prisom.directbanking.data.remote.dto.BankConnectionDto
 import uk.co.prisom.directbanking.data.remote.dto.ConnectedAccountDto
@@ -54,12 +57,21 @@ import uk.co.prisom.directbanking.ui.vm.ConnectAction
  * (Plaid) launch the official Plaid Link SDK and return a public token.
  */
 @Composable
-private fun HandleConnectAction(action: ConnectAction?, onConsumed: () -> Unit, onPlaidSuccess: (connectionId: String, publicToken: String) -> Unit) {
+private fun HandleConnectAction(
+    action: ConnectAction?,
+    onConsumed: () -> Unit,
+    onPlaidSuccess: (connectionId: String, publicToken: String) -> Unit,
+    onPlaidExit: () -> Unit,
+) {
     val context = LocalContext.current
     var pendingConnectionId by remember { mutableStateOf<String?>(null) }
+    // Plaid Link SDK 6 session flow: the launcher opens a PlaidLinkSession.
     val plaidLauncher = rememberLauncherForActivityResult(OpenPlaidLink()) { result ->
         val cid = pendingConnectionId
-        if (result is LinkSuccess && cid != null) onPlaidSuccess(cid, result.publicToken)
+        when (result) {
+            is LinkSuccess -> if (cid != null) onPlaidSuccess(cid, result.publicToken)
+            is LinkExit -> onPlaidExit() // safe cancellation — no connection is completed
+        }
         pendingConnectionId = null
     }
     LaunchedEffect(action) {
@@ -69,8 +81,13 @@ private fun HandleConnectAction(action: ConnectAction?, onConsumed: () -> Unit, 
                 onConsumed()
             }
             is ConnectAction.LaunchPlaid -> {
-                pendingConnectionId = a.connectionId
-                plaidLauncher.launch(LinkTokenConfiguration.Builder().token(a.linkToken).build())
+                val activity = context as? ComponentActivity
+                if (activity != null) {
+                    pendingConnectionId = a.connectionId
+                    val configuration = linkTokenConfiguration { token = a.linkToken }
+                    val session = Plaid.createPlaidLinkSession(activity, configuration)
+                    plaidLauncher.launch(session)
+                }
                 onConsumed()
             }
             null -> Unit
@@ -83,7 +100,12 @@ fun BankConnectionsScreen(vm: BankConnectionsViewModel, onOpen: (String) -> Unit
     val state by vm.state.collectAsStateWithLifecycle()
     val action by vm.action.collectAsStateWithLifecycle()
     val starting by vm.starting.collectAsStateWithLifecycle()
-    HandleConnectAction(action, onConsumed = { vm.consumedAction() }, onPlaidSuccess = { cid, pub -> vm.completePlaid(cid, pub) })
+    HandleConnectAction(
+        action,
+        onConsumed = { vm.consumedAction() },
+        onPlaidSuccess = { cid, pub -> vm.completePlaid(cid, pub) },
+        onPlaidExit = { vm.onLinkCancelled() },
+    )
 
     Column(Modifier.fillMaxSize()) {
         Text("Bank connections", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(16.dp))
@@ -131,7 +153,12 @@ fun BankConnectionDetailScreen(vm: BankConnectionDetailViewModel, onDisconnected
     val state by vm.state.collectAsStateWithLifecycle()
     val action by vm.action.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
-    HandleConnectAction(action, onConsumed = { vm.consumedAction() }, onPlaidSuccess = { _, pub -> vm.completePlaid(pub) })
+    HandleConnectAction(
+        action,
+        onConsumed = { vm.consumedAction() },
+        onPlaidSuccess = { _, pub -> vm.completePlaid(pub) },
+        onPlaidExit = { vm.onLinkCancelled() },
+    )
 
     when (val s = state) {
         is Async.Loading -> LoadingBox()

@@ -386,6 +386,8 @@ class BankConnectionsViewModel(private val repo: uk.co.prisom.directbanking.data
     fun completePlaid(connectionId: String, publicToken: String) = viewModelScope.launch {
         runCatching { repo.complete(connectionId, publicToken) }.onSuccess { refresh() }
     }
+    /** The user exited Plaid Link without finishing — no connection is completed. */
+    fun onLinkCancelled() { refresh() }
     fun consumedAction() { action.value = null }
 }
 
@@ -418,6 +420,7 @@ class BankConnectionDetailViewModel(
     fun completePlaid(publicToken: String) = viewModelScope.launch {
         runCatching { repo.complete(connectionId, publicToken) }.onSuccess { load() }
     }
+    fun onLinkCancelled() { message.value = "Reconnect cancelled"; load() }
     fun disconnect(onDone: () -> Unit) = viewModelScope.launch {
         runCatching { repo.disconnect(connectionId) }.onSuccess { onDone() }
     }
