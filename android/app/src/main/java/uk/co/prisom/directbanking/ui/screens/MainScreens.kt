@@ -129,11 +129,24 @@ fun DashboardScreen(
                 }
 
                 Spacer(Modifier.height(16.dp))
+                // Notification-capture sync and Open Banking sync stay separately diagnosable (§21).
                 Text(
-                    "Last sync: " + if (lastSync > 0) DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(lastSync)) else "never",
+                    "Notifications synced: " + if (lastSync > 0) DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(lastSync)) else "never",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                val bs = d.bankSync
+                if (bs.connectionCount > 0) {
+                    Text(
+                        when {
+                            bs.needsAttention > 0 -> "${bs.needsAttention} bank${if (bs.needsAttention > 1) "s" else ""} need attention"
+                            bs.lastBankSyncAt != null -> "Banks synced ${bs.lastBankSyncAt.take(10)}"
+                            else -> "Banks connected: ${bs.connectionCount}"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (bs.needsAttention > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Spacer(Modifier.height(16.dp))
                 Text("More", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(8.dp))
@@ -227,6 +240,7 @@ fun SettingsScreen(
     onManageSources: () -> Unit,
     onNotificationAccess: () -> Unit,
     onDiagnostics: () -> Unit,
+    onBankConnections: () -> Unit,
     debugRoute: String?,
     onOpenDebug: () -> Unit,
 ) {
@@ -234,6 +248,8 @@ fun SettingsScreen(
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text("Settings & privacy", style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.height(16.dp))
+        OutlinedButton(onClick = onBankConnections, modifier = Modifier.fillMaxWidth()) { Text("Bank connections") }
+        Spacer(Modifier.height(8.dp))
         OutlinedButton(onClick = onManageSources, modifier = Modifier.fillMaxWidth()) { Text("Approved notification sources") }
         Spacer(Modifier.height(8.dp))
         OutlinedButton(onClick = onNotificationAccess, modifier = Modifier.fillMaxWidth()) { Text("Notification access") }

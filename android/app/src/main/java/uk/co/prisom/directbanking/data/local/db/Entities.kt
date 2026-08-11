@@ -87,3 +87,17 @@ data class UpcomingPaymentEntity(
     val expectedAmountMinor: Long,
     val cachedAtMillis: Long,
 )
+
+/**
+ * Phase 3 offline cache of the user's bank connections so the connections screen
+ * can render without a network round-trip. The backend remains canonical.
+ */
+@Entity(tableName = "bank_connection_cache")
+data class BankConnectionCacheEntity(
+    @PrimaryKey val id: String,
+    val provider: String,
+    val status: String,
+    val institutionName: String?,
+    val lastSuccessfulSyncAt: String?,
+    val cachedAtMillis: Long,
+)

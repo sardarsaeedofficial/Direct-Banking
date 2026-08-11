@@ -1,6 +1,7 @@
 import { env } from "../env.js";
 import { logger } from "../logger.js";
 import { processDueReminders, markOverduePayments } from "../services/reminder-scheduler.service.js";
+import { startBankSyncScheduler, stopBankSyncScheduler } from "./bank-sync-scheduler.js";
 
 let timer: NodeJS.Timeout | null = null;
 let running = false;
@@ -25,9 +26,12 @@ export function startScheduler(): void {
   void tick(); // run once at boot to catch anything missed while down
   timer = setInterval(() => void tick(), intervalMs);
   timer.unref?.();
+  // Open Banking scheduled sync (no-op unless enabled + BANK_SYNC_CRON is set).
+  startBankSyncScheduler();
 }
 
 export function stopScheduler(): void {
   if (timer) clearInterval(timer);
   timer = null;
+  void stopBankSyncScheduler();
 }

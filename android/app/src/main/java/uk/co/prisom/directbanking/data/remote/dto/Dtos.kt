@@ -172,6 +172,13 @@ data class DdUpdateRequest(
 )
 
 @Serializable
+data class BankSyncStatusDto(
+    val connectionCount: Int = 0,
+    val needsAttention: Int = 0,
+    val lastBankSyncAt: String? = null,
+)
+
+@Serializable
 data class BootstrapResponse(
     val user: UserDto? = null,
     val accounts: List<AccountDto> = emptyList(),
@@ -179,8 +186,64 @@ data class BootstrapResponse(
     val directDebits: List<DirectDebitDto> = emptyList(),
     val dashboard: DashboardDto = DashboardDto(),
     val pendingImports: Int = 0,
+    val bankSync: BankSyncStatusDto = BankSyncStatusDto(),
     val serverTime: String? = null,
 )
+
+// Phase 3 — Open Banking / bank connections ------------------------------------
+@Serializable
+data class BankConnectionDto(
+    val id: String,
+    val provider: String = "",
+    val status: String = "PENDING",
+    val institutionName: String? = null,
+    val consentGrantedAt: String? = null,
+    val consentExpiresAt: String? = null,
+    val lastSyncedAt: String? = null,
+    val lastSuccessfulSyncAt: String? = null,
+    val lastErrorAt: String? = null,
+    val lastErrorCode: String? = null,
+    val createdAt: String? = null,
+)
+
+@Serializable
+data class ConnectedAccountDto(
+    val id: String,
+    val nickname: String = "",
+    val bankName: String = "",
+    val currency: String = "GBP",
+    val accountHolderName: String? = null,
+    val sortCodeMasked: String? = null,
+    val accountNumberMasked: String? = null,
+    val ibanMasked: String? = null,
+    val balanceMinor: Long = 0,
+    val balanceAuthority: String = "LEDGER",
+)
+
+@Serializable
+data class StartConnectionResponse(
+    val connectionId: String,
+    val provider: String = "",
+    val mode: String = "hosted_url", // "hosted_url" (TrueLayer) | "link_token" (Plaid)
+    val authorizationUrl: String? = null,
+    val linkToken: String? = null,
+)
+
+@Serializable data class CompleteConnectionRequest(val publicToken: String)
+@Serializable data class OkResponse(val ok: Boolean = false)
+@Serializable data class BankConnectionListResponse(val items: List<BankConnectionDto> = emptyList())
+@Serializable data class BankConnectionDetailResponse(val connection: BankConnectionDto, val accounts: List<ConnectedAccountDto> = emptyList())
+@Serializable data class SyncSummaryDto(val accountsLinked: Int = 0, val imported: Int = 0, val matched: Int = 0, val duplicates: Int = 0)
+@Serializable data class SyncResponse(val ok: Boolean = false, val summary: SyncSummaryDto = SyncSummaryDto())
+@Serializable
+data class ReauthorizeResponse(
+    val connectionId: String,
+    val provider: String = "",
+    val mode: String = "hosted_url",
+    val authorizationUrl: String? = null,
+    val linkToken: String? = null,
+)
+@Serializable data class RevokeResponse(val revoked: Boolean = false)
 
 @Serializable
 data class NotifImportRequest(

@@ -27,6 +27,8 @@ import uk.co.prisom.directbanking.ui.LocalContainer
 import uk.co.prisom.directbanking.ui.containerViewModel
 import uk.co.prisom.directbanking.ui.screens.AccountsScreen
 import uk.co.prisom.directbanking.ui.screens.ApprovedSourcesScreen
+import uk.co.prisom.directbanking.ui.screens.BankConnectionDetailScreen
+import uk.co.prisom.directbanking.ui.screens.BankConnectionsScreen
 import uk.co.prisom.directbanking.ui.screens.CreateAccountScreen
 import uk.co.prisom.directbanking.ui.screens.DashboardScreen
 import uk.co.prisom.directbanking.ui.screens.DiagnosticsScreen
@@ -43,6 +45,8 @@ import uk.co.prisom.directbanking.ui.screens.SyncStatusScreen
 import uk.co.prisom.directbanking.ui.screens.TransactionsScreen
 import uk.co.prisom.directbanking.ui.session.SessionState
 import uk.co.prisom.directbanking.ui.session.SessionViewModel
+import uk.co.prisom.directbanking.ui.vm.BankConnectionDetailViewModel
+import uk.co.prisom.directbanking.ui.vm.BankConnectionsViewModel
 import uk.co.prisom.directbanking.ui.vm.DashboardViewModel
 import uk.co.prisom.directbanking.ui.vm.DiagnosticsViewModel
 import uk.co.prisom.directbanking.ui.vm.DirectDebitDetailViewModel
@@ -67,6 +71,8 @@ private object Routes {
     const val SYNC = "sync"
     const val ACCESS = "notificationaccess"
     const val DIAGNOSTICS = "diagnostics"
+    const val BANK_CONNECTIONS = "bankconnections"
+    const val BANK_CONNECTION_DETAIL = "bankconnection"
     const val SIGN_IN = "signin"
     const val CREATE = "create"
 }
@@ -157,8 +163,22 @@ private fun MainNav(session: SessionViewModel) {
                     onManageSources = { nav.navigate(Routes.SOURCES) },
                     onNotificationAccess = { nav.navigate(Routes.ACCESS) },
                     onDiagnostics = { nav.navigate(Routes.DIAGNOSTICS) },
+                    onBankConnections = { nav.navigate(Routes.BANK_CONNECTIONS) },
                     debugRoute = DebugHooks.simulatorRoute,
                     onOpenDebug = { DebugHooks.simulatorRoute?.let { nav.navigate(it) } },
+                )
+            }
+            composable(Routes.BANK_CONNECTIONS) {
+                BankConnectionsScreen(
+                    vm = containerViewModel { BankConnectionsViewModel(it.bankConnectionRepository) },
+                    onOpen = { id -> nav.navigate("${Routes.BANK_CONNECTION_DETAIL}/$id") },
+                )
+            }
+            composable("${Routes.BANK_CONNECTION_DETAIL}/{id}") { entry ->
+                val id = entry.arguments?.getString("id") ?: ""
+                BankConnectionDetailScreen(
+                    vm = containerViewModel { BankConnectionDetailViewModel(it.bankConnectionRepository, id) },
+                    onDisconnected = { nav.popBackStack() },
                 )
             }
             composable(Routes.ACCESS) { NotificationAccessScreen(onManageSources = { nav.navigate(Routes.SOURCES) }) }

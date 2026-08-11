@@ -149,3 +149,18 @@ interface UpcomingDao {
     @Query("DELETE FROM upcoming_payment_cache")
     suspend fun clear()
 }
+
+@Dao
+interface BankConnectionDao {
+    @Query("SELECT * FROM bank_connection_cache ORDER BY institutionName")
+    fun observe(): Flow<List<BankConnectionCacheEntity>>
+
+    @Query("SELECT * FROM bank_connection_cache ORDER BY institutionName")
+    suspend fun all(): List<BankConnectionCacheEntity>
+
+    @Upsert
+    suspend fun upsertAll(items: List<BankConnectionCacheEntity>)
+
+    @Query("DELETE FROM bank_connection_cache")
+    suspend fun clear()
+}

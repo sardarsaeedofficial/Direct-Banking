@@ -30,6 +30,16 @@ import {
 import { getDashboard } from "../services/dashboard.service.js";
 import { registerUser } from "../services/users.service.js";
 import { txnCorrectionSchema, ddUpdateSchema, ddMergeSchema } from "@direct-banking/shared";
+import {
+  startConnection,
+  handleCallback,
+  completeConnectionWithPublicToken,
+  handleProviderWebhook,
+  reauthorize,
+  revokeConnection,
+  syncConnection,
+} from "../services/open-banking/bank-feed.service.js";
+import { getProvider, openBankingEnabled, returnUri } from "../services/open-banking/registry.js";
 
 export const mobileRouter = Router();
 
@@ -143,6 +153,15 @@ mobileRouter.get(
       getDashboard(userId),
     ]);
     const pendingImports = await prisma.notificationImport.count({ where: { userId, status: NotifStatus.PENDING } });
+    // Aggregate Open Banking sync status for the Home screen (§21).
+    const connections = await prisma.bankConnection.findMany({
+      where: { userId },
+      select: { status: true, lastSuccessfulSyncAt: true },
+    });
+    const needsAttention = connections.filter((c) => c.status === "REAUTH_REQUIRED" || c.status === "ERROR" || c.status === "EXPIRED").length;
+    const lastBankSyncAt = connections
+      .map((c) => c.lastSuccessfulSyncAt?.getTime() ?? 0)
+      .reduce((m, t) => Math.max(m, t), 0);
     res.json({
       user: user ? publicUser(user) : null,
       accounts,
@@ -164,6 +183,11 @@ mobileRouter.get(
         upcomingPayments: dashboard.upcomingPayments,
       },
       pendingImports,
+      bankSync: {
+        connectionCount: connections.length,
+        needsAttention,
+        lastBankSyncAt: lastBankSyncAt > 0 ? new Date(lastBankSyncAt).toISOString() : null,
+      },
       serverTime: new Date().toISOString(),
     });
   }),
@@ -457,6 +481,166 @@ mobileRouter.post(
     });
     const refreshed = await mandateOr404(userId, into.id);
     res.json({ mandate: publicMandate(refreshed) });
+  }),
+);
+
+// ── Bank connections / Open Banking (Phase 3) ───────────────────────────────
+
+function requireOpenBanking() {
+  if (!openBankingEnabled() || !getProvider()) throw new HttpError(503, "Open Banking is not enabled");
+}
+
+function publicConnection(c: Record<string, any>) {
+  return {
+    id: c.id,
+    provider: c.provider,
+    status: c.status,
+    institutionName: c.institutionName,
+    consentGrantedAt: c.consentGrantedAt?.toISOString?.() ?? null,
+    consentExpiresAt: c.consentExpiresAt?.toISOString?.() ?? null,
+    lastSyncedAt: c.lastSyncedAt?.toISOString?.() ?? null,
+    lastSuccessfulSyncAt: c.lastSuccessfulSyncAt?.toISOString?.() ?? null,
+    lastErrorAt: c.lastErrorAt?.toISOString?.() ?? null,
+    lastErrorCode: c.lastErrorCode ?? null,
+    createdAt: c.createdAt?.toISOString?.() ?? null,
+  };
+}
+
+mobileRouter.post(
+  "/bank-connections/start",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    requireOpenBanking();
+    const result = await startConnection(req.mobileAuth!.userId, req.mobileAuth!.deviceRowId, returnUri());
+    res.status(201).json(result);
+  }),
+);
+
+mobileRouter.get(
+  "/bank-connections",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const items = await prisma.bankConnection.findMany({ where: { userId: req.mobileAuth!.userId }, orderBy: { createdAt: "desc" } });
+    res.json({ items: items.map(publicConnection) });
+  }),
+);
+
+// Provider authorization callback (browser redirect target). No mobile JWT — the
+// one-time `state` bound to the connection is the CSRF protection.
+mobileRouter.get(
+  "/bank-connections/callback",
+  asyncHandler(async (req, res) => {
+    requireOpenBanking();
+    // Data v3: the user returns to our HTTPS return URI carrying our one-time
+    // application state (no authorization code). We validate the state and then
+    // resolve the connection lifecycle with the provider.
+    const state = typeof req.query.state === "string" ? req.query.state : "";
+    if (!state) throw new HttpError(400, "Missing callback state");
+    const result = await handleCallback(state);
+    if (!result) throw new HttpError(400, "Invalid or expired authorization state");
+    // Minimal success page; a production app deep-links back into the client.
+    res.status(200).type("html").send("<!doctype html><meta charset=utf-8><title>Bank connected</title><body>Bank connected. You can return to Direct Banking.</body>");
+  }),
+);
+
+// Complete a link-token connection (Plaid): the client sends the public_token it
+// received from Plaid Link; the server exchanges it and starts importing.
+mobileRouter.post(
+  "/bank-connections/:id/complete",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    requireOpenBanking();
+    const userId = req.mobileAuth!.userId;
+    const publicToken = typeof req.body?.publicToken === "string" ? req.body.publicToken : "";
+    if (!publicToken) throw new HttpError(400, "A public token is required");
+    await connectionOr404(userId, req.params.id);
+    const result = await completeConnectionWithPublicToken(userId, req.params.id, publicToken);
+    if (!result.ok) throw new HttpError(result.code === "NOT_FOUND" ? 404 : 400, "Could not complete the connection", { code: result.code });
+    res.json({ ok: true });
+  }),
+);
+
+// Provider webhook (Plaid). Not mobile-authenticated — authenticity comes from the
+// signed Plaid-Verification JWT (when configured); the body is never trusted as
+// transaction data, only as a trigger for an idempotent sync.
+mobileRouter.post(
+  "/bank-connections/webhook",
+  asyncHandler(async (req, res) => {
+    const provider = getProvider();
+    const jwt = req.header("plaid-verification");
+    if (provider && typeof (provider as { verifyWebhook?: unknown }).verifyWebhook === "function" && jwt) {
+      const raw = (req as unknown as { rawBody?: string }).rawBody ?? JSON.stringify(req.body ?? {});
+      const ok = await (provider as unknown as { verifyWebhook: (b: string, j: string) => Promise<boolean> }).verifyWebhook(raw, jwt);
+      if (!ok) throw new HttpError(403, "Invalid webhook signature");
+    }
+    const body = (req.body ?? {}) as { webhook_type?: string; webhook_code?: string; item_id?: string };
+    if (body.item_id && body.webhook_code) await handleProviderWebhook(body.item_id, body.webhook_code);
+    res.json({ ok: true });
+  }),
+);
+
+async function connectionOr404(userId: string, id: string) {
+  const c = await prisma.bankConnection.findFirst({ where: { id, userId } });
+  if (!c) throw new HttpError(404, "Connection not found");
+  return c;
+}
+
+mobileRouter.get(
+  "/bank-connections/:id",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const conn = await connectionOr404(userId, req.params.id);
+    const accounts = await prisma.bankAccount.findMany({
+      where: { userId, bankConnectionId: conn.id },
+      select: { id: true, nickname: true, bankName: true, currency: true, accountHolderName: true, sortCodeMasked: true, accountNumberMasked: true, ibanMasked: true, balanceMinor: true, balanceAuthority: true },
+    });
+    res.json({
+      connection: publicConnection(conn),
+      accounts: accounts.map((a) => ({ ...a, balanceMinor: Number(a.balanceMinor) })),
+    });
+  }),
+);
+
+mobileRouter.post(
+  "/bank-connections/:id/sync",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    requireOpenBanking();
+    const userId = req.mobileAuth!.userId;
+    await connectionOr404(userId, req.params.id);
+    try {
+      const summary = await syncConnection(userId, req.params.id);
+      res.json({ ok: true, summary });
+    } catch (err) {
+      // Sanitised: never surface provider internals; previous data is preserved.
+      const code = err instanceof Error ? err.message : "SYNC_FAILED";
+      throw new HttpError(502, code === "REAUTH_REQUIRED" ? "Reauthorization required" : "Sync failed", { code });
+    }
+  }),
+);
+
+mobileRouter.post(
+  "/bank-connections/:id/reauthorize",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    requireOpenBanking();
+    const userId = req.mobileAuth!.userId;
+    await connectionOr404(userId, req.params.id);
+    const result = await reauthorize(userId, req.params.id, req.mobileAuth!.deviceRowId, returnUri());
+    if (!result) throw new HttpError(404, "Connection not found");
+    res.json(result);
+  }),
+);
+
+mobileRouter.delete(
+  "/bank-connections/:id",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    await connectionOr404(userId, req.params.id);
+    const ok = await revokeConnection(userId, req.params.id);
+    res.json({ revoked: ok });
   }),
 );
 

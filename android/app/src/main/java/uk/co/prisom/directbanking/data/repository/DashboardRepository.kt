@@ -3,6 +3,7 @@ package uk.co.prisom.directbanking.data.repository
 import uk.co.prisom.directbanking.domain.AccountSummary
 import uk.co.prisom.directbanking.domain.DashboardData
 import uk.co.prisom.directbanking.domain.DashboardSummary
+import uk.co.prisom.directbanking.domain.BankSyncStatus
 import uk.co.prisom.directbanking.domain.DirectDebitSummary
 import uk.co.prisom.directbanking.domain.UpcomingPayment
 
@@ -36,6 +37,7 @@ class DashboardRepository(private val authRepository: AuthRepository) {
             upcomingPayments = b.dashboard.upcomingPayments.map {
                 UpcomingPayment(it.mandateId, it.companyName, it.account, it.expectedDate, it.expectedAmountMinor, it.isRange, it.expectedMinMinor, it.expectedMaxMinor)
             },
+            bankSync = BankSyncStatus(b.bankSync.connectionCount, b.bankSync.needsAttention, b.bankSync.lastBankSyncAt),
         )
     }
 }

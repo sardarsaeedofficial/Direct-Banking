@@ -30,6 +30,12 @@ export interface CreateTxnInput {
   paymentReason?: string | null;
   sourceBankPackage?: string | null;
   occurredAt?: Date | null;
+  settledAt?: Date | null;
+  // ---- Phase 3 ----
+  // When false, the transaction is recorded WITHOUT moving BankAccount.balanceMinor
+  // (balanceApplied=false). Used for provider-authoritative (Open Banking) accounts
+  // whose balance comes from the bank, so historical imports never double-count.
+  applyBalance?: boolean;
 }
 
 /** Canonical ledger type implied by a coarse direction when none is supplied. */
@@ -112,8 +118,10 @@ export async function createTransaction(userId: string, input: CreateTxnInput, c
     expectedPaymentId: expectedPaymentId ?? undefined,
     importBatchId: input.importBatchId ?? undefined,
     dedupeHash: hash,
-    // Newly-created transactions always maintain the balance (unless cancelled).
-    balanceApplied: (input.status ?? "COMPLETED") !== "CANCELLED",
+    // Newly-created transactions maintain the balance unless cancelled or the
+    // caller opted out (provider-authoritative accounts).
+    balanceApplied: (input.applyBalance ?? true) && (input.status ?? "COMPLETED") !== "CANCELLED",
+    settledAt: input.settledAt ?? undefined,
     // ---- Phase 1 rich ledger fields ----
     transactionType: input.transactionType ?? defaultTypeFor(input.direction),
     merchantName: input.merchantName ?? undefined,
@@ -131,9 +139,10 @@ export async function createTransaction(userId: string, input: CreateTxnInput, c
   // is adjusted atomically with the transaction so the dashboard total stays
   // consistent (ledger = opening + credits − debits). CANCELLED rows don't move money.
   const status = data.status ?? "COMPLETED";
+  const applyBalance = (input.applyBalance ?? true) && status !== "CANCELLED";
   const run = async (tx: Prisma.TransactionClient) => {
     const created = await tx.transaction.create({ data, include: { merchant: true, category: true, account: true } });
-    if (status !== "CANCELLED") {
+    if (applyBalance) {
       const delta = input.direction === "INCOME" ? amountMinor : -amountMinor;
       await tx.bankAccount.update({ where: { id: input.accountId }, data: { balanceMinor: { increment: delta } } });
       // A transfer moves value to the counterparty account (net worth unchanged).
@@ -144,6 +153,26 @@ export async function createTransaction(userId: string, input: CreateTxnInput, c
     return created;
   };
   return client ? run(client) : prisma.$transaction(run);
+}
+
+/**
+ * Set a provider-authoritative balance (Phase 3). For PROVIDER accounts the bank's
+ * reported balance is the truth — this overwrites balanceMinor directly instead of
+ * summing transactions, so importing history never double-counts.
+ */
+export async function setProviderBalance(
+  client: Prisma.TransactionClient,
+  accountId: string,
+  currentMinor: number,
+  availableMinor?: number | null,
+): Promise<void> {
+  await client.bankAccount.update({
+    where: { id: accountId },
+    data: {
+      balanceMinor: BigInt(currentMinor),
+      availableBalanceMinor: availableMinor != null ? BigInt(availableMinor) : undefined,
+    },
+  });
 }
 
 /**

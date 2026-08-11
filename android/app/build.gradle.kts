@@ -60,9 +60,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
     buildFeatures {
         compose = true
         buildConfig = true
@@ -82,13 +79,22 @@ android {
     lint {
         warningsAsErrors = false
         abortOnError = true
-        disable += setOf("GradleDependency", "NewerVersionAvailable")
+        // PropertyEscape flags the machine-specific, gitignored local.properties
+        // (unescaped Windows SDK path) — not app code.
+        disable += setOf("GradleDependency", "NewerVersionAvailable", "PropertyEscape")
     }
 }
 
 // Export Room schemas so migrations can be validated and tracked in version control.
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
+}
+
+// Kotlin 2.3 compiler options (replaces the removed kotlinOptions DSL).
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
 }
 
 dependencies {
@@ -121,6 +127,9 @@ dependencies {
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.androidx.security.crypto)
     implementation(libs.androidx.datastore.preferences)
+
+    // Plaid Link — launches the bank authorization journey for Plaid-backed connections.
+    implementation(libs.plaid.link)
 
     testImplementation(libs.junit)
     testImplementation(libs.mockk)
