@@ -243,11 +243,17 @@ fun SettingsScreen(
     onBankConnections: () -> Unit,
     debugRoute: String?,
     onOpenDebug: () -> Unit,
+    onReview: () -> Unit = {},
+    onManageBudgets: () -> Unit = {},
 ) {
     val context = LocalContext.current
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text("Settings & privacy", style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.height(16.dp))
+        OutlinedButton(onClick = onReview, modifier = Modifier.fillMaxWidth()) { Text("Review imported transactions") }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(onClick = onManageBudgets, modifier = Modifier.fillMaxWidth()) { Text("Manage budgets") }
+        Spacer(Modifier.height(8.dp))
         OutlinedButton(onClick = onBankConnections, modifier = Modifier.fillMaxWidth()) { Text("Bank connections") }
         Spacer(Modifier.height(8.dp))
         OutlinedButton(onClick = onManageSources, modifier = Modifier.fillMaxWidth()) { Text("Approved notification sources") }

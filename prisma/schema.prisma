@@ -210,6 +210,9 @@ model User {
   displayName      String?
   baseCurrency     String   @default("GBP")
   locale           String   @default("en-GB")
+  // IANA timezone used to compute reporting-period boundaries (Phase 4). Data is
+  // always stored in UTC; only period math is done in the user's timezone.
+  timezone         String   @default("Europe/London")
   twoFactorSecret  String?
   twoFactorEnabled Boolean  @default(false)
   createdAt        DateTime @default(now())
@@ -219,6 +222,7 @@ model User {
   accounts      BankAccount[]
   merchants     Merchant[]
   categories    Category[]
+  categoryRules CategoryRule[]
   transactions  Transaction[]
   recurring     RecurringPayment[]
   expected      ExpectedPayment[]
@@ -316,6 +320,9 @@ model Category {
   userId   String
   user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   name     String
+  // Stable code (e.g. "GROCERIES") so logic never depends on display text (Phase 4).
+  code     String?
+  isSystem Boolean @default(false) // seeded default vs user-created
   colour   String  @default("#64748b")
   icon     String?
   parentId String?
@@ -326,8 +333,45 @@ model Category {
   recurring    RecurringPayment[]
   budgets      Budget[]
   merchants    Merchant[]
+  rules        CategoryRule[]
 
   @@unique([userId, name])
+  @@index([userId, code])
+}
+
+// ---------- Phase 4: categorisation, budgets, insights ----------
+enum RuleField {
+  MERCHANT
+  NORMALIZED_MERCHANT
+  DESCRIPTION
+  RECIPIENT
+  SENDER
+  DD_COMPANY
+}
+
+enum RuleOperator {
+  CONTAINS
+  EQUALS
+  STARTS_WITH
+}
+
+// A user categorisation rule: "if <field> <operator> <value> → category".
+model CategoryRule {
+  id            String       @id @default(cuid())
+  userId        String
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  field         RuleField
+  operator      RuleOperator @default(CONTAINS)
+  value         String
+  categoryId    String
+  category      Category     @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  subcategoryId String? // soft reference to a child category
+  priority      Int          @default(100)
+  enabled       Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([userId, enabled, priority])
 }
 
 model Transaction {
@@ -446,6 +490,9 @@ model Transaction {
   @@index([directDebitMandateId])
   @@index([userId, internalTransferGroupId])
   @@index([userId, transactionType])
+  // Phase 4: fast category/merchant reporting per user over a period.
+  @@index([userId, categoryId, bookedAt])
+  @@index([userId, merchantId, bookedAt])
 }
 
 // A recurring payee/mandate (Phase 2). Owns the payment history, the expected
@@ -642,16 +689,28 @@ model Budget {
   userId     String
   user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   name       String
-  categoryId String?
+  categoryId String? // null = overall monthly spending budget
   category   Category?    @relation(fields: [categoryId], references: [id])
   period     BudgetPeriod @default(MONTHLY)
   limitMinor BigInt
   currency   String       @default("GBP")
   startDate  DateTime
+  // ---- Phase 4 additions ----
+  endDate         DateTime?
+  rolloverEnabled Boolean   @default(false)
+  enabled         Boolean   @default(true)
+  alert50         Boolean   @default(true)
+  alert75         Boolean   @default(true)
+  alert90         Boolean   @default(true)
+  alert100        Boolean   @default(true)
+  // Highest threshold already alerted this period (for de-duplicated alerts).
+  lastAlertPct       Int?
+  lastAlertPeriodKey String?
   createdAt  DateTime     @default(now())
   updatedAt  DateTime     @updatedAt
 
   @@index([userId])
+  @@index([userId, categoryId])
 }
 
 model ImportBatch {

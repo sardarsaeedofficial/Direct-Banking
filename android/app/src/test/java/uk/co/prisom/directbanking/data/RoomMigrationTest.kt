@@ -147,6 +147,34 @@ class RoomMigrationTest {
         db.close()
     }
 
+    /** Opens a minimal v6 database (the 6→7 migration adds a brand-new table). */
+    private fun openV6(name: String): SupportSQLiteDatabase {
+        context.deleteDatabase(name)
+        val config = SupportSQLiteOpenHelper.Configuration.builder(context)
+            .name(name)
+            .callback(object : SupportSQLiteOpenHelper.Callback(6) {
+                override fun onCreate(db: SupportSQLiteDatabase) {
+                    db.execSQL("CREATE TABLE `placeholder6` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL)")
+                }
+                override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+            })
+            .build()
+        return FrameworkSQLiteOpenHelperFactory().create(config).writableDatabase
+    }
+
+    @Test
+    fun `migration 6 to 7 adds the insights cache table`() {
+        val db = openV6("mig-test-6-7.db")
+        DirectBankingDatabase.MIGRATION_6_7.migrate(db)
+        db.execSQL("INSERT INTO insights_cache VALUES ('overview','{\"safeToSpend\":{}}',1000)")
+        db.query("SELECT json, cachedAtMillis FROM insights_cache WHERE `key`='overview'").use { c ->
+            c.moveToFirst()
+            assertEquals("{\"safeToSpend\":{}}", c.getString(0))
+            assertEquals(1000, c.getInt(1))
+        }
+        db.close()
+    }
+
     @Test
     fun `migration 1 to 2 adds ignored column and preserves data`() {
         val db = openV1("mig-test.db")

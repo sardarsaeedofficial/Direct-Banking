@@ -29,7 +29,20 @@ import {
 } from "../services/direct-debit.service.js";
 import { getDashboard } from "../services/dashboard.service.js";
 import { registerUser } from "../services/users.service.js";
-import { txnCorrectionSchema, ddUpdateSchema, ddMergeSchema } from "@direct-banking/shared";
+import { teachMerchantCategory } from "../services/categorization.service.js";
+import {
+  monthlySummary, periodComparison, categoryBreakdown, topMerchants, netWorth,
+} from "../services/insights.service.js";
+import { budgetProgress, evaluateBudgetAlerts } from "../services/budgets.service.js";
+import { merchantProfile } from "../services/merchant-intelligence.service.js";
+import { cashFlowForecast, safeToSpend, upcomingPayments } from "../services/cashflow.service.js";
+import { recurringPaymentsView, detectSubscriptions } from "../services/recurring.service.js";
+import type { PeriodKind } from "../services/period.service.js";
+import {
+  txnCorrectionSchema, ddUpdateSchema, ddMergeSchema,
+  budgetSchema, budgetUpdateSchema, categorySchema,
+  categoryRuleSchema, categoryRuleUpdateSchema, recurringPaymentPatchSchema,
+} from "@direct-banking/shared";
 import {
   startConnection,
   handleCallback,
@@ -306,6 +319,12 @@ mobileRouter.patch(
     });
     // Recompute any mandate whose payment set changed (balance-safe: no money moved).
     for (const mid of mandatesToRecompute) await recomputeMandate(userId, mid);
+    // Teach: a user's explicit category correction updates the merchant's learned
+    // default so future transactions from the same merchant inherit it. Historical
+    // rows are never rewritten — only future categorisation changes.
+    if (body.categoryId !== undefined && txn.merchantId) {
+      await teachMerchantCategory(userId, txn.merchantId, body.categoryId ?? null);
+    }
     res.json({ transaction: updated });
   }),
 );
@@ -927,5 +946,467 @@ mobileRouter.delete(
     if (!item) throw new HttpError(404, "Import not found");
     await prisma.notificationImport.delete({ where: { id: item.id } });
     res.json({ deleted: true });
+  }),
+);
+
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 4 — Financial insights, budgets, categories, recurring, activity
+// Every route is ownership-scoped by req.mobileAuth.userId and returns only
+// canonical/derived data (never raw provider payloads, tokens or full account
+// numbers). Reporting periods are computed in the user's timezone.
+// ══════════════════════════════════════════════════════════════════════════
+
+async function getUserTz(userId: string): Promise<string> {
+  const u = await prisma.user.findUnique({ where: { id: userId }, select: { timezone: true } });
+  return u?.timezone ?? "Europe/London";
+}
+
+function parsePeriod(req: { query: Record<string, unknown> }): { kind: PeriodKind; customStart?: Date; customEnd?: Date } {
+  const p = typeof req.query.period === "string" ? req.query.period : "month";
+  if (p === "custom") {
+    const s = new Date(String(req.query.start));
+    const e = new Date(String(req.query.end));
+    if (isNaN(s.getTime()) || isNaN(e.getTime())) throw new HttpError(400, "A custom period requires valid start and end dates");
+    return { kind: "custom", customStart: s, customEnd: e };
+  }
+  if (p === "week" || p === "year" || p === "month") return { kind: p };
+  return { kind: "month" };
+}
+
+// ── Insights ────────────────────────────────────────────────────────────────
+mobileRouter.get(
+  "/insights/overview",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const tz = await getUserTz(userId);
+    const [summary, comparison, budgets, worth, safe, upcoming] = await Promise.all([
+      monthlySummary(userId, tz),
+      periodComparison(userId, tz, "month"),
+      budgetProgress(userId, tz),
+      netWorth(userId),
+      safeToSpend(userId),
+      upcomingPayments(userId, 30),
+    ]);
+    res.json({ summary, comparison, budgets, netWorth: worth, safeToSpend: safe, upcoming });
+  }),
+);
+
+mobileRouter.get(
+  "/insights/summary",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const tz = await getUserTz(userId);
+    const basis = req.query.basis === "year" ? "year" : "month";
+    const [summary, comparison] = await Promise.all([monthlySummary(userId, tz), periodComparison(userId, tz, basis)]);
+    res.json({ summary, comparison });
+  }),
+);
+
+mobileRouter.get(
+  "/insights/categories",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const tz = await getUserTz(userId);
+    const { kind, customStart, customEnd } = parsePeriod(req);
+    res.json(await categoryBreakdown(userId, tz, kind, { customStart, customEnd }));
+  }),
+);
+
+mobileRouter.get(
+  "/insights/merchants",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const tz = await getUserTz(userId);
+    const { kind, customStart, customEnd } = parsePeriod(req);
+    const limit = Math.min(Number(req.query.limit) || 10, 50);
+    res.json(await topMerchants(userId, tz, kind, { customStart, customEnd, limit }));
+  }),
+);
+
+mobileRouter.get(
+  "/insights/cash-flow",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const tz = await getUserTz(userId);
+    res.json(await cashFlowForecast(userId, tz));
+  }),
+);
+
+mobileRouter.get(
+  "/insights/net-worth",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    res.json(await netWorth(req.mobileAuth!.userId));
+  }),
+);
+
+mobileRouter.get(
+  "/insights/safe-to-spend",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const reserve = Math.max(0, Number(req.query.reserve) || 0);
+    res.json(await safeToSpend(req.mobileAuth!.userId, reserve));
+  }),
+);
+
+// ── Categories ───────────────────────────────────────────────────────────────
+mobileRouter.get(
+  "/categories",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const items = await prisma.category.findMany({
+      where: { userId: req.mobileAuth!.userId },
+      select: { id: true, name: true, code: true, colour: true, icon: true, parentId: true, isSystem: true },
+      orderBy: [{ parentId: "asc" }, { name: "asc" }],
+    });
+    res.json({ items });
+  }),
+);
+
+mobileRouter.post(
+  "/categories",
+  requireMobileAuth,
+  validate(categorySchema),
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const body = validated<typeof categorySchema>(res);
+    if (body.parentId) {
+      const parent = await prisma.category.findFirst({ where: { id: body.parentId, userId } });
+      if (!parent) throw new HttpError(404, "Parent category not found");
+    }
+    const created = await prisma.category.create({
+      data: { userId, name: body.name, colour: body.colour, icon: body.icon, parentId: body.parentId ?? null, isSystem: false },
+    });
+    res.status(201).json({ category: created });
+  }),
+);
+
+mobileRouter.patch(
+  "/categories/:id",
+  requireMobileAuth,
+  validate(categorySchema.partial()),
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const existing = await prisma.category.findFirst({ where: { id: req.params.id, userId } });
+    if (!existing) throw new HttpError(404, "Category not found");
+    const body = validated<ReturnType<typeof categorySchema.partial>>(res);
+    const updated = await prisma.category.update({
+      where: { id: existing.id },
+      data: { name: body.name, colour: body.colour, icon: body.icon },
+    });
+    res.json({ category: updated });
+  }),
+);
+
+mobileRouter.delete(
+  "/categories/:id",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const existing = await prisma.category.findFirst({ where: { id: req.params.id, userId } });
+    if (!existing) throw new HttpError(404, "Category not found");
+    if (existing.isSystem) throw new HttpError(400, "Default categories cannot be deleted");
+    // Detach references before deleting (rules cascade automatically). Transactions and
+    // budgets keep their history but lose the category link; children reparent to root.
+    await prisma.transaction.updateMany({ where: { userId, categoryId: existing.id }, data: { categoryId: null } });
+    await prisma.budget.updateMany({ where: { userId, categoryId: existing.id }, data: { categoryId: null } });
+    await prisma.category.updateMany({ where: { userId, parentId: existing.id }, data: { parentId: null } });
+    await prisma.category.delete({ where: { id: existing.id } });
+    res.json({ deleted: true });
+  }),
+);
+
+// ── Category rules ────────────────────────────────────────────────────────────
+mobileRouter.get(
+  "/category-rules",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const items = await prisma.categoryRule.findMany({
+      where: { userId: req.mobileAuth!.userId },
+      orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+    });
+    res.json({ items });
+  }),
+);
+
+async function assertOwnsCategory(userId: string, categoryId: string): Promise<void> {
+  const cat = await prisma.category.findFirst({ where: { id: categoryId, userId }, select: { id: true } });
+  if (!cat) throw new HttpError(404, "Category not found");
+}
+
+mobileRouter.post(
+  "/category-rules",
+  requireMobileAuth,
+  validate(categoryRuleSchema),
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const body = validated<typeof categoryRuleSchema>(res);
+    await assertOwnsCategory(userId, body.categoryId);
+    if (body.subcategoryId) await assertOwnsCategory(userId, body.subcategoryId);
+    const created = await prisma.categoryRule.create({
+      data: {
+        userId, field: body.field, operator: body.operator, value: body.value,
+        categoryId: body.categoryId, subcategoryId: body.subcategoryId ?? null,
+        priority: body.priority ?? 100, enabled: body.enabled ?? true,
+      },
+    });
+    res.status(201).json({ rule: created });
+  }),
+);
+
+mobileRouter.patch(
+  "/category-rules/:id",
+  requireMobileAuth,
+  validate(categoryRuleUpdateSchema),
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const existing = await prisma.categoryRule.findFirst({ where: { id: req.params.id, userId } });
+    if (!existing) throw new HttpError(404, "Rule not found");
+    const body = validated<typeof categoryRuleUpdateSchema>(res);
+    if (body.categoryId) await assertOwnsCategory(userId, body.categoryId);
+    if (body.subcategoryId) await assertOwnsCategory(userId, body.subcategoryId);
+    const updated = await prisma.categoryRule.update({ where: { id: existing.id }, data: body });
+    res.json({ rule: updated });
+  }),
+);
+
+mobileRouter.delete(
+  "/category-rules/:id",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const existing = await prisma.categoryRule.findFirst({ where: { id: req.params.id, userId } });
+    if (!existing) throw new HttpError(404, "Rule not found");
+    await prisma.categoryRule.delete({ where: { id: existing.id } });
+    res.json({ deleted: true });
+  }),
+);
+
+// ── Budgets ──────────────────────────────────────────────────────────────────
+mobileRouter.get(
+  "/budgets",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const tz = await getUserTz(userId);
+    res.json({ items: await budgetProgress(userId, tz) });
+  }),
+);
+
+mobileRouter.get(
+  "/budgets/alerts",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const tz = await getUserTz(userId);
+    res.json({ alerts: await evaluateBudgetAlerts(userId, tz) });
+  }),
+);
+
+mobileRouter.post(
+  "/budgets",
+  requireMobileAuth,
+  validate(budgetSchema),
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const body = validated<typeof budgetSchema>(res);
+    if (body.categoryId) await assertOwnsCategory(userId, body.categoryId);
+    const created = await prisma.budget.create({
+      data: {
+        userId, name: body.name, categoryId: body.categoryId ?? null, period: body.period,
+        limitMinor: BigInt(body.limitMinor), currency: body.currency, startDate: new Date(body.startDate),
+        endDate: body.endDate ? new Date(body.endDate) : null,
+        rolloverEnabled: body.rolloverEnabled ?? false, enabled: body.enabled ?? true,
+        alert50: body.alert50 ?? true, alert75: body.alert75 ?? true, alert90: body.alert90 ?? true, alert100: body.alert100 ?? true,
+      },
+    });
+    res.status(201).json({ budget: { ...created, limitMinor: Number(created.limitMinor) } });
+  }),
+);
+
+mobileRouter.patch(
+  "/budgets/:id",
+  requireMobileAuth,
+  validate(budgetUpdateSchema),
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const existing = await prisma.budget.findFirst({ where: { id: req.params.id, userId } });
+    if (!existing) throw new HttpError(404, "Budget not found");
+    const body = validated<typeof budgetUpdateSchema>(res);
+    if (body.categoryId) await assertOwnsCategory(userId, body.categoryId);
+    const data: Prisma.BudgetUncheckedUpdateInput = {};
+    if (body.name !== undefined) data.name = body.name;
+    if (body.categoryId !== undefined) data.categoryId = body.categoryId;
+    if (body.period !== undefined) data.period = body.period;
+    if (body.limitMinor !== undefined) data.limitMinor = BigInt(body.limitMinor);
+    if (body.currency !== undefined) data.currency = body.currency;
+    if (body.startDate !== undefined) data.startDate = new Date(body.startDate);
+    if (body.endDate !== undefined) data.endDate = body.endDate ? new Date(body.endDate) : null;
+    if (body.rolloverEnabled !== undefined) data.rolloverEnabled = body.rolloverEnabled;
+    if (body.enabled !== undefined) data.enabled = body.enabled;
+    if (body.alert50 !== undefined) data.alert50 = body.alert50;
+    if (body.alert75 !== undefined) data.alert75 = body.alert75;
+    if (body.alert90 !== undefined) data.alert90 = body.alert90;
+    if (body.alert100 !== undefined) data.alert100 = body.alert100;
+    const updated = await prisma.budget.update({ where: { id: existing.id }, data });
+    res.json({ budget: { ...updated, limitMinor: Number(updated.limitMinor) } });
+  }),
+);
+
+mobileRouter.delete(
+  "/budgets/:id",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const existing = await prisma.budget.findFirst({ where: { id: req.params.id, userId } });
+    if (!existing) throw new HttpError(404, "Budget not found");
+    await prisma.budget.delete({ where: { id: existing.id } });
+    res.json({ deleted: true });
+  }),
+);
+
+// ── Recurring payments (DD + subscriptions + standing orders, combined) ───────
+mobileRouter.get(
+  "/recurring-payments",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    res.json(await recurringPaymentsView(req.mobileAuth!.userId));
+  }),
+);
+
+mobileRouter.get(
+  "/recurring-payments/suggestions",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    res.json({ items: await detectSubscriptions(req.mobileAuth!.userId) });
+  }),
+);
+
+mobileRouter.get(
+  "/recurring-payments/:id",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const m = await prisma.directDebitMandate.findFirst({
+      where: { id: req.params.id, userId },
+      include: { account: { select: { nickname: true, bankName: true } } },
+    });
+    if (!m) throw new HttpError(404, "Recurring payment not found");
+    const recentPayments = await prisma.transaction.findMany({
+      where: { userId, directDebitMandateId: m.id },
+      select: { id: true, amountMinor: true, bookedAt: true, description: true },
+      orderBy: { bookedAt: "desc" }, take: 12,
+    });
+    res.json({ recurring: publicMandate(m), payments: recentPayments.map((p) => ({ ...p, amountMinor: Number(p.amountMinor), bookedAt: p.bookedAt.toISOString() })) });
+  }),
+);
+
+mobileRouter.patch(
+  "/recurring-payments/:id",
+  requireMobileAuth,
+  validate(recurringPaymentPatchSchema),
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const existing = await prisma.directDebitMandate.findFirst({ where: { id: req.params.id, userId } });
+    if (!existing) throw new HttpError(404, "Recurring payment not found");
+    const body = validated<typeof recurringPaymentPatchSchema>(res);
+    const data: Prisma.DirectDebitMandateUncheckedUpdateInput = {};
+    if (body.status !== undefined) data.status = body.status;
+    if (body.notes !== undefined) data.notes = body.notes;
+    if (body.userExpectedAmountMinor !== undefined) {
+      data.userExpectedAmountMinor = body.userExpectedAmountMinor;
+      data.userConfiguredExpectedAmount = body.userExpectedAmountMinor != null;
+    }
+    if (body.userExpectedDate !== undefined) data.userExpectedDate = body.userExpectedDate ? new Date(body.userExpectedDate) : null;
+    await prisma.directDebitMandate.update({ where: { id: existing.id }, data });
+    await recomputeMandate(userId, existing.id);
+    const refreshed = await prisma.directDebitMandate.findFirst({
+      where: { id: existing.id, userId },
+      include: { account: { select: { nickname: true, bankName: true } } },
+    });
+    res.json({ recurring: publicMandate(refreshed!) });
+  }),
+);
+
+// ── Merchant profile ──────────────────────────────────────────────────────────
+mobileRouter.get(
+  "/merchants/:id",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const tz = await getUserTz(userId);
+    const profile = await merchantProfile(userId, req.params.id, tz);
+    if (!profile) throw new HttpError(404, "Merchant not found");
+    res.json({ merchant: profile });
+  }),
+);
+
+// ── Activity search (server-side filters + pagination) ────────────────────────
+mobileRouter.get(
+  "/activity",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const q = req.query;
+    const str = (k: string) => (typeof q[k] === "string" && (q[k] as string).trim() ? (q[k] as string).trim() : undefined);
+    const limit = Math.min(Number(q.limit) || 50, 200);
+    const offset = Math.max(0, Number(q.offset) || 0);
+
+    const where: Prisma.TransactionWhereInput = { userId, parentId: null };
+    const text = str("q");
+    if (text) {
+      where.OR = [
+        { description: { contains: text, mode: "insensitive" } },
+        { merchantName: { contains: text, mode: "insensitive" } },
+        { senderName: { contains: text, mode: "insensitive" } },
+        { recipientName: { contains: text, mode: "insensitive" } },
+        { paymentReference: { contains: text, mode: "insensitive" } },
+      ];
+    }
+    if (str("merchantId")) where.merchantId = str("merchantId");
+    if (str("categoryId")) where.categoryId = str("categoryId");
+    if (str("accountId")) where.accountId = str("accountId");
+    if (str("sender")) where.senderName = { contains: str("sender")!, mode: "insensitive" };
+    if (str("recipient")) where.recipientName = { contains: str("recipient")!, mode: "insensitive" };
+    if (str("direction")) where.direction = str("direction") as never;
+    if (str("type")) where.transactionType = str("type") as never;
+    if (str("source")) where.source = str("source") as never;
+    const settled = str("settled");
+    if (settled === "pending") where.status = "PENDING";
+    else if (settled === "settled") where.status = "COMPLETED";
+    else if (str("status")) where.status = str("status") as never;
+
+    const amount: Prisma.BigIntFilter = {};
+    if (q.minAmount != null && !isNaN(Number(q.minAmount))) amount.gte = BigInt(Math.round(Number(q.minAmount)));
+    if (q.maxAmount != null && !isNaN(Number(q.maxAmount))) amount.lte = BigInt(Math.round(Number(q.maxAmount)));
+    if (amount.gte !== undefined || amount.lte !== undefined) where.amountMinor = amount;
+
+    const dateFilter: Prisma.DateTimeFilter = {};
+    if (str("from")) { const d = new Date(str("from")!); if (!isNaN(d.getTime())) dateFilter.gte = d; }
+    if (str("to")) { const d = new Date(str("to")!); if (!isNaN(d.getTime())) dateFilter.lte = d; }
+    if (dateFilter.gte !== undefined || dateFilter.lte !== undefined) where.bookedAt = dateFilter;
+
+    const [total, rows] = await Promise.all([
+      prisma.transaction.count({ where }),
+      prisma.transaction.findMany({
+        where,
+        include: {
+          account: { select: { nickname: true } },
+          category: { select: { name: true, colour: true } },
+          merchant: { select: { displayName: true } },
+        },
+        orderBy: { bookedAt: "desc" },
+        skip: offset,
+        take: limit,
+      }),
+    ]);
+    const items = rows.map((t) => ({ ...t, amountMinor: Number(t.amountMinor) }));
+    const nextOffset = offset + rows.length < total ? offset + rows.length : null;
+    res.json({ items, total, limit, offset, nextOffset });
   }),
 );

@@ -128,7 +128,7 @@ export function predictNextDate(datesAsc: Date[], frequency: DdFrequency, dayOfM
 
 // ---- Effective expectation (user override beats learned) -------------------
 
-interface MandateLike {
+export interface MandateLike {
   expectationMode: "FIXED" | "RANGE" | "LEARNED";
   expectedAmountMinor: number | null;
   expectedMinMinor: number | null;

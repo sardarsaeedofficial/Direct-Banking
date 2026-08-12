@@ -18,6 +18,7 @@ import uk.co.prisom.directbanking.data.repository.BankConnectionRepository
 import uk.co.prisom.directbanking.data.repository.DashboardRepository
 import uk.co.prisom.directbanking.data.repository.DirectDebitRepository
 import uk.co.prisom.directbanking.data.repository.ImportRepository
+import uk.co.prisom.directbanking.data.repository.InsightsRepository
 import uk.co.prisom.directbanking.data.repository.SourceRepository
 import uk.co.prisom.directbanking.data.repository.SyncRepository
 import uk.co.prisom.directbanking.data.repository.TransactionRepository
@@ -40,6 +41,7 @@ class AppContainer(context: Context) {
     val dashboardRepository = DashboardRepository(authRepository)
     val transactionRepository = TransactionRepository(apiClients)
     val directDebitRepository = DirectDebitRepository(apiClients, db.upcomingDao())
+    val insightsRepository = InsightsRepository(apiClients, db.insightsCacheDao(), json)
     val bankConnectionRepository = BankConnectionRepository(apiClients, db.bankConnectionDao())
     val sourceRepository = SourceRepository(db.sourceDao())
     val importRepository = ImportRepository(

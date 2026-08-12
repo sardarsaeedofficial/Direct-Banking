@@ -3,9 +3,9 @@ package uk.co.prisom.directbanking.ui.navigation
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.RateReview
+import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -35,6 +35,9 @@ import uk.co.prisom.directbanking.ui.screens.DiagnosticsScreen
 import uk.co.prisom.directbanking.ui.screens.DirectDebitsScreen
 import uk.co.prisom.directbanking.ui.screens.DirectDebitDetailScreen
 import uk.co.prisom.directbanking.ui.screens.DisclosureScreen
+import uk.co.prisom.directbanking.ui.screens.InsightsScreen
+import uk.co.prisom.directbanking.ui.screens.BudgetsScreen
+import uk.co.prisom.directbanking.ui.screens.PaymentsScreen
 import uk.co.prisom.directbanking.ui.screens.NotificationAccessScreen
 import uk.co.prisom.directbanking.ui.screens.NotificationsScreen
 import uk.co.prisom.directbanking.ui.screens.ReviewImportsScreen
@@ -51,6 +54,9 @@ import uk.co.prisom.directbanking.ui.vm.DashboardViewModel
 import uk.co.prisom.directbanking.ui.vm.DiagnosticsViewModel
 import uk.co.prisom.directbanking.ui.vm.DirectDebitDetailViewModel
 import uk.co.prisom.directbanking.ui.vm.DirectDebitsViewModel
+import uk.co.prisom.directbanking.ui.vm.InsightsViewModel
+import uk.co.prisom.directbanking.ui.vm.BudgetsViewModel
+import uk.co.prisom.directbanking.ui.vm.PaymentsViewModel
 import uk.co.prisom.directbanking.ui.vm.OverviewViewModel
 import uk.co.prisom.directbanking.ui.vm.ReviewViewModel
 import uk.co.prisom.directbanking.ui.vm.SettingsViewModel
@@ -61,6 +67,9 @@ import uk.co.prisom.directbanking.ui.vm.TransactionsViewModel
 private object Routes {
     const val DASHBOARD = "dashboard"
     const val TRANSACTIONS = "transactions"
+    const val PAYMENTS = "payments"
+    const val INSIGHTS = "insights"
+    const val BUDGETS = "budgets"
     const val REVIEW = "review"
     const val SOURCES = "sources"
     const val SETTINGS = "settings"
@@ -79,11 +88,13 @@ private object Routes {
 
 private data class Tab(val route: String, val label: String, val icon: ImageVector)
 
+// Phase 4 primary navigation (spec §19): Home · Activity · Payments · Insights · Settings.
+// Review and Approved sources remain reachable from Settings.
 private val tabs = listOf(
     Tab(Routes.DASHBOARD, "Home", Icons.Filled.Home),
     Tab(Routes.TRANSACTIONS, "Activity", Icons.AutoMirrored.Filled.List),
-    Tab(Routes.REVIEW, "Review", Icons.Filled.RateReview),
-    Tab(Routes.SOURCES, "Sources", Icons.Filled.Apps),
+    Tab(Routes.PAYMENTS, "Payments", Icons.Filled.Payments),
+    Tab(Routes.INSIGHTS, "Insights", Icons.Filled.BarChart),
     Tab(Routes.SETTINGS, "Settings", Icons.Filled.Settings),
 )
 
@@ -146,6 +157,18 @@ private fun MainNav(session: SessionViewModel) {
             composable(Routes.TRANSACTIONS) {
                 TransactionsScreen(containerViewModel { TransactionsViewModel(it.transactionRepository, it.dashboardRepository) })
             }
+            composable(Routes.PAYMENTS) {
+                PaymentsScreen(
+                    vm = containerViewModel { PaymentsViewModel(it.insightsRepository) },
+                    onOpen = { id -> nav.navigate("${Routes.DIRECT_DEBIT_DETAIL}/$id") },
+                )
+            }
+            composable(Routes.INSIGHTS) {
+                InsightsScreen(containerViewModel { InsightsViewModel(it.insightsRepository) })
+            }
+            composable(Routes.BUDGETS) {
+                BudgetsScreen(containerViewModel { BudgetsViewModel(it.insightsRepository) })
+            }
             composable(Routes.REVIEW) {
                 ReviewImportsScreen(containerViewModel { ReviewViewModel(it.importRepository, it.authRepository, it.appContext) })
             }
@@ -166,6 +189,8 @@ private fun MainNav(session: SessionViewModel) {
                     onBankConnections = { nav.navigate(Routes.BANK_CONNECTIONS) },
                     debugRoute = DebugHooks.simulatorRoute,
                     onOpenDebug = { DebugHooks.simulatorRoute?.let { nav.navigate(it) } },
+                    onReview = { nav.navigate(Routes.REVIEW) },
+                    onManageBudgets = { nav.navigate(Routes.BUDGETS) },
                 )
             }
             composable(Routes.BANK_CONNECTIONS) {

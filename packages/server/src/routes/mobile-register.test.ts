@@ -1,5 +1,6 @@
 import type { Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { DEFAULT_CATEGORY_COUNT } from "../services/users.service.js";
 
 // Integration tests for POST /api/mobile/v1/auth/register (shared registerUser
 // service). They run when a database is reachable (CI / local Postgres) and skip
@@ -67,7 +68,9 @@ describe("mobile registration", () => {
     expect(res.json.refreshToken).toBeTruthy();
     const user = await prisma.user.findUnique({ where: { email }, include: { categories: true } });
     expect(user).toBeTruthy();
-    expect(user.categories.length).toBe(10);
+    expect(user.categories.length).toBe(DEFAULT_CATEGORY_COUNT);
+    // Every seeded category carries a stable code and is flagged as a system default.
+    expect(user.categories.every((c) => c.code && c.isSystem)).toBe(true);
   });
 
   it("rejects a duplicate email with 409", async (ctx) => {
