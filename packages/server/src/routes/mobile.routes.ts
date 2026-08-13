@@ -53,6 +53,17 @@ import {
   syncConnection,
 } from "../services/open-banking/bank-feed.service.js";
 import { getProvider, openBankingEnabled, returnUri } from "../services/open-banking/registry.js";
+import {
+  createStatementImport,
+  reconcileStatement,
+  importStatement,
+  ImportOwnershipError,
+} from "../services/statement-import.service.js";
+import { resolveFileType } from "../services/statement/index.js";
+import { getReviewCentre, mergeDuplicate, keepSeparate, ReviewError } from "../services/review.service.js";
+import { pairInternalTransfer, unpairInternalTransfer, TransferPairError } from "../services/transfer-pairing.service.js";
+import { exportTransactionsCsv } from "../services/export.service.js";
+import type { TxnType } from "@prisma/client";
 
 export const mobileRouter = Router();
 
@@ -1408,5 +1419,247 @@ mobileRouter.get(
     const items = rows.map((t) => ({ ...t, amountMinor: Number(t.amountMinor) }));
     const nextOffset = offset + rows.length < total ? offset + rows.length : null;
     res.json({ items, total, limit, offset, nextOffset });
+  }),
+);
+
+// ============================================================================
+// Phase 5 — statement import, review centre, transfer pairing, export
+// ============================================================================
+
+const STATEMENT_MAX_BYTES = Number(process.env.STATEMENT_MAX_BYTES ?? 5_000_000);
+
+function serializeImport(imp: {
+  id: string; accountId: string; filename: string; fileType: string; institution: string | null;
+  status: string; transactionCount: number; importedCount: number; duplicateCount: number; reviewCount: number;
+  periodStart: Date | null; periodEnd: Date | null; error: string | null; createdAt: Date; completedAt: Date | null;
+}) {
+  return {
+    id: imp.id, accountId: imp.accountId, filename: imp.filename, fileType: imp.fileType, institution: imp.institution,
+    status: imp.status, transactionCount: imp.transactionCount, importedCount: imp.importedCount,
+    duplicateCount: imp.duplicateCount, reviewCount: imp.reviewCount,
+    periodStart: imp.periodStart?.toISOString() ?? null, periodEnd: imp.periodEnd?.toISOString() ?? null,
+    error: imp.error, createdAt: imp.createdAt.toISOString(), completedAt: imp.completedAt?.toISOString() ?? null,
+  };
+}
+
+// Upload + parse a statement (raw file is parsed in memory, never persisted).
+mobileRouter.post(
+  "/statements",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const body = (req.body ?? {}) as { accountId?: string; filename?: string; fileType?: string; contentBase64?: string; institution?: string };
+    if (!body.accountId || !body.filename || !body.contentBase64) {
+      throw new HttpError(400, "accountId, filename and contentBase64 are required");
+    }
+    const filename = body.filename.replace(/[\\/]/g, "_").slice(0, 200); // never used as a path
+    let buffer: Buffer;
+    try {
+      buffer = Buffer.from(body.contentBase64, "base64");
+    } catch {
+      throw new HttpError(400, "contentBase64 is not valid base64");
+    }
+    if (buffer.length === 0) throw new HttpError(400, "Empty file");
+    if (buffer.length > STATEMENT_MAX_BYTES) throw new HttpError(413, "Statement file too large");
+    const fileType = resolveFileType(body.fileType, filename);
+    if (!fileType) throw new HttpError(400, "Unsupported file type — use CSV, OFX, QIF or a text PDF");
+
+    try {
+      const imp = await createStatementImport(userId, { accountId: body.accountId, filename, fileType, buffer, institution: body.institution ?? null });
+      res.status(201).json({ import: serializeImport(imp!) });
+    } catch (e) {
+      if (e instanceof ImportOwnershipError) throw new HttpError(404, e.message);
+      throw e;
+    }
+  }),
+);
+
+mobileRouter.get(
+  "/statements",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const rows = await prisma.statementImport.findMany({ where: { userId }, orderBy: { createdAt: "desc" }, take: 100 });
+    res.json({ items: rows.map(serializeImport) });
+  }),
+);
+
+async function ownedImport(userId: string, id: string) {
+  const imp = await prisma.statementImport.findFirst({ where: { id, userId } });
+  if (!imp) throw new HttpError(404, "Statement import not found");
+  return imp;
+}
+
+mobileRouter.get(
+  "/statements/:id",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const imp = await ownedImport(userId, req.params.id);
+    res.json({ import: serializeImport(imp) });
+  }),
+);
+
+mobileRouter.post(
+  "/statements/:id/parse",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    await ownedImport(userId, req.params.id);
+    const counts = await reconcileStatement(userId, req.params.id);
+    const imp = await ownedImport(userId, req.params.id);
+    res.json({ import: serializeImport(imp), counts });
+  }),
+);
+
+mobileRouter.get(
+  "/statements/:id/preview",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const imp = await ownedImport(userId, req.params.id);
+    const candidates = await prisma.statementCandidate.findMany({ where: { statementImportId: imp.id }, orderBy: { rowIndex: "asc" }, take: 5000 });
+    const rows = candidates.map((c) => ({
+      id: c.id,
+      rowIndex: c.rowIndex,
+      bookedAt: c.bookedAt.toISOString(),
+      amountMinor: Number(c.amountMinor),
+      currency: c.currency,
+      direction: c.direction,
+      description: c.description,
+      reference: c.reference,
+      reconStatus: c.reconStatus,
+      excluded: c.excluded,
+    }));
+    const summary = {
+      found: candidates.length,
+      newCount: rows.filter((r) => r.reconStatus === "NEW").length,
+      duplicateCount: rows.filter((r) => r.reconStatus === "DUPLICATE" || r.reconStatus === "MATCHED").length,
+      reviewCount: rows.filter((r) => r.reconStatus === "REVIEW").length,
+    };
+    res.json({ import: serializeImport(imp), summary, rows });
+  }),
+);
+
+mobileRouter.post(
+  "/statements/:id/import",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    await ownedImport(userId, req.params.id);
+    const body = (req.body ?? {}) as { excludeRowIndexes?: number[]; rebuildBalance?: boolean };
+    const excludeRowIndexes = Array.isArray(body.excludeRowIndexes) ? body.excludeRowIndexes.filter((n) => Number.isInteger(n)) : [];
+    try {
+      const result = await importStatement(userId, req.params.id, { excludeRowIndexes, rebuildBalance: body.rebuildBalance === true });
+      const imp = await ownedImport(userId, req.params.id);
+      res.json({ import: serializeImport(imp), result });
+    } catch (e) {
+      if (e instanceof ImportOwnershipError) throw new HttpError(404, e.message);
+      throw e;
+    }
+  }),
+);
+
+mobileRouter.delete(
+  "/statements/:id",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    await ownedImport(userId, req.params.id);
+    await prisma.statementImport.delete({ where: { id: req.params.id } });
+    res.json({ deleted: true });
+  }),
+);
+
+// ---- Review Centre ----
+mobileRouter.get(
+  "/review",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    res.json(await getReviewCentre(userId));
+  }),
+);
+
+mobileRouter.post(
+  "/review/:id/merge",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    try {
+      res.json(await mergeDuplicate(userId, req.params.id));
+    } catch (e) {
+      if (e instanceof ReviewError) throw new HttpError(400, e.message);
+      throw e;
+    }
+  }),
+);
+
+mobileRouter.post(
+  "/review/:id/keep-separate",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    try {
+      res.json(await keepSeparate(userId, req.params.id));
+    } catch (e) {
+      if (e instanceof ReviewError) throw new HttpError(400, e.message);
+      throw e;
+    }
+  }),
+);
+
+// ---- Manual internal-transfer pairing ----
+mobileRouter.post(
+  "/internal-transfers/pair",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const body = (req.body ?? {}) as { transactionAId?: string; transactionBId?: string };
+    if (!body.transactionAId || !body.transactionBId) throw new HttpError(400, "transactionAId and transactionBId are required");
+    try {
+      res.json(await pairInternalTransfer(userId, body.transactionAId, body.transactionBId));
+    } catch (e) {
+      if (e instanceof TransferPairError) throw new HttpError(400, e.message);
+      throw e;
+    }
+  }),
+);
+
+mobileRouter.post(
+  "/internal-transfers/unpair",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const body = (req.body ?? {}) as { transactionId?: string };
+    if (!body.transactionId) throw new HttpError(400, "transactionId is required");
+    try {
+      res.json(await unpairInternalTransfer(userId, body.transactionId));
+    } catch (e) {
+      if (e instanceof TransferPairError) throw new HttpError(400, e.message);
+      throw e;
+    }
+  }),
+);
+
+// ---- CSV export (canonical financial data only) ----
+mobileRouter.get(
+  "/export/transactions",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const q = req.query as Record<string, string | undefined>;
+    const from = q.from ? new Date(q.from) : undefined;
+    const to = q.to ? new Date(q.to) : undefined;
+    const csv = await exportTransactionsCsv(userId, {
+      accountId: q.accountId,
+      categoryId: q.categoryId,
+      transactionType: q.type as TxnType | undefined,
+      from: from && !isNaN(from.getTime()) ? from : undefined,
+      to: to && !isNaN(to.getTime()) ? to : undefined,
+    });
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="transactions.csv"');
+    res.send(csv);
   }),
 );

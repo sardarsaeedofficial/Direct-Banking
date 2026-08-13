@@ -2,6 +2,7 @@ package uk.co.prisom.directbanking.ui.screens
 
 import android.Manifest
 import android.content.Intent
+import kotlinx.coroutines.launch
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -137,11 +138,37 @@ fun SettingsScreen(
     onOpenDebug: () -> Unit,
     onReview: () -> Unit = {},
     onManageBudgets: () -> Unit = {},
+    onImportStatement: () -> Unit = {},
+    onReviewCentre: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    val container = uk.co.prisom.directbanking.ui.LocalContainer.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text("Settings & privacy", style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.height(16.dp))
+        OutlinedButton(onClick = onImportStatement, modifier = Modifier.fillMaxWidth()) { Text("Import bank statement") }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(onClick = onReviewCentre, modifier = Modifier.fillMaxWidth()) { Text("Review matches & duplicates") }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = {
+                scope.launch {
+                    val ok = runCatching {
+                        val bytes = container.reviewRepository.exportCsv()
+                        val send = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/csv"
+                            putExtra(Intent.EXTRA_SUBJECT, "Direct Banking transactions")
+                            putExtra(Intent.EXTRA_TEXT, String(bytes))
+                        }
+                        context.startActivity(Intent.createChooser(send, "Export transactions"))
+                    }.isSuccess
+                    if (!ok) android.widget.Toast.makeText(context, "Export failed — try again", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Export transactions (CSV)") }
+        Spacer(Modifier.height(8.dp))
         OutlinedButton(onClick = onReview, modifier = Modifier.fillMaxWidth()) { Text("Review imported transactions") }
         Spacer(Modifier.height(8.dp))
         OutlinedButton(onClick = onManageBudgets, modifier = Modifier.fillMaxWidth()) { Text("Manage budgets") }

@@ -205,6 +205,56 @@ interface MobileApi {
     @GET("api/mobile/v1/merchants/{id}")
     suspend fun merchantProfile(@Path("id") id: String): uk.co.prisom.directbanking.data.remote.dto.MerchantProfileResponse
 
+    // ── Phase 5 — Statement import ────────────────────────────────────────────
+    @POST("api/mobile/v1/statements")
+    suspend fun createStatement(@Body body: uk.co.prisom.directbanking.data.remote.dto.StatementCreateRequest): uk.co.prisom.directbanking.data.remote.dto.StatementImportResponse
+
+    @GET("api/mobile/v1/statements")
+    suspend fun listStatements(): uk.co.prisom.directbanking.data.remote.dto.StatementListResponse
+
+    @GET("api/mobile/v1/statements/{id}")
+    suspend fun statement(@Path("id") id: String): uk.co.prisom.directbanking.data.remote.dto.StatementImportResponse
+
+    @POST("api/mobile/v1/statements/{id}/parse")
+    suspend fun parseStatement(@Path("id") id: String): uk.co.prisom.directbanking.data.remote.dto.StatementPreviewResponse
+
+    @GET("api/mobile/v1/statements/{id}/preview")
+    suspend fun previewStatement(@Path("id") id: String): uk.co.prisom.directbanking.data.remote.dto.StatementPreviewResponse
+
+    @POST("api/mobile/v1/statements/{id}/import")
+    suspend fun importStatement(@Path("id") id: String, @Body body: uk.co.prisom.directbanking.data.remote.dto.StatementImportRequest): uk.co.prisom.directbanking.data.remote.dto.StatementImportResultResponse
+
+    @DELETE("api/mobile/v1/statements/{id}")
+    suspend fun deleteStatement(@Path("id") id: String): DeletedResponse
+
+    // ── Phase 5 — Review centre ───────────────────────────────────────────────
+    @GET("api/mobile/v1/review")
+    suspend fun reviewCentre(): uk.co.prisom.directbanking.data.remote.dto.ReviewCentreDto
+
+    @POST("api/mobile/v1/review/{id}/merge")
+    suspend fun reviewMerge(@Path("id") id: String): uk.co.prisom.directbanking.data.remote.dto.ActionResponse
+
+    @POST("api/mobile/v1/review/{id}/keep-separate")
+    suspend fun reviewKeepSeparate(@Path("id") id: String): uk.co.prisom.directbanking.data.remote.dto.ActionResponse
+
+    // ── Phase 5 — Manual internal-transfer pairing ────────────────────────────
+    @POST("api/mobile/v1/internal-transfers/pair")
+    suspend fun pairTransfer(@Body body: uk.co.prisom.directbanking.data.remote.dto.PairRequest): uk.co.prisom.directbanking.data.remote.dto.ActionResponse
+
+    @POST("api/mobile/v1/internal-transfers/unpair")
+    suspend fun unpairTransfer(@Body body: uk.co.prisom.directbanking.data.remote.dto.UnpairRequest): uk.co.prisom.directbanking.data.remote.dto.ActionResponse
+
+    // ── Phase 5 — CSV export (raw body, not JSON) ─────────────────────────────
+    @retrofit2.http.Streaming
+    @GET("api/mobile/v1/export/transactions")
+    suspend fun exportTransactions(
+        @Query("accountId") accountId: String? = null,
+        @Query("categoryId") categoryId: String? = null,
+        @Query("type") type: String? = null,
+        @Query("from") from: String? = null,
+        @Query("to") to: String? = null,
+    ): okhttp3.ResponseBody
+
     // ── Phase 4 — Activity search (server filters + pagination) ────────────────
     @GET("api/mobile/v1/activity")
     suspend fun activity(
