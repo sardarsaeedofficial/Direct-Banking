@@ -30,7 +30,7 @@ import uk.co.prisom.directbanking.ui.screens.ApprovedSourcesScreen
 import uk.co.prisom.directbanking.ui.screens.BankConnectionDetailScreen
 import uk.co.prisom.directbanking.ui.screens.BankConnectionsScreen
 import uk.co.prisom.directbanking.ui.screens.CreateAccountScreen
-import uk.co.prisom.directbanking.ui.screens.DashboardScreen
+import uk.co.prisom.directbanking.ui.screens.HomeScreen
 import uk.co.prisom.directbanking.ui.screens.DiagnosticsScreen
 import uk.co.prisom.directbanking.ui.screens.DirectDebitsScreen
 import uk.co.prisom.directbanking.ui.screens.DirectDebitDetailScreen
@@ -50,10 +50,10 @@ import uk.co.prisom.directbanking.ui.session.SessionState
 import uk.co.prisom.directbanking.ui.session.SessionViewModel
 import uk.co.prisom.directbanking.ui.vm.BankConnectionDetailViewModel
 import uk.co.prisom.directbanking.ui.vm.BankConnectionsViewModel
-import uk.co.prisom.directbanking.ui.vm.DashboardViewModel
 import uk.co.prisom.directbanking.ui.vm.DiagnosticsViewModel
 import uk.co.prisom.directbanking.ui.vm.DirectDebitDetailViewModel
 import uk.co.prisom.directbanking.ui.vm.DirectDebitsViewModel
+import uk.co.prisom.directbanking.ui.vm.HomeViewModel
 import uk.co.prisom.directbanking.ui.vm.InsightsViewModel
 import uk.co.prisom.directbanking.ui.vm.BudgetsViewModel
 import uk.co.prisom.directbanking.ui.vm.PaymentsViewModel
@@ -145,12 +145,16 @@ private fun MainNav(session: SessionViewModel) {
     ) { padding ->
         NavHost(nav, startDestination = Routes.DASHBOARD, modifier = Modifier.padding(padding)) {
             composable(Routes.DASHBOARD) {
-                DashboardScreen(
-                    dashboard = containerViewModel { DashboardViewModel(it.dashboardRepository) },
+                HomeScreen(
+                    home = containerViewModel { HomeViewModel(it.insightsRepository, it.dashboardRepository, it.transactionRepository) },
                     sync = containerViewModel { SyncViewModel(it.syncRepository, it.appPreferences, it.appContext) },
+                    onCashFlow = { nav.navigate(Routes.INSIGHTS) },
+                    onPayments = { nav.navigate(Routes.PAYMENTS) },
+                    onBudgets = { nav.navigate(Routes.BUDGETS) },
+                    onActivity = { nav.navigate(Routes.TRANSACTIONS) },
                     onAccounts = { nav.navigate(Routes.ACCOUNTS) },
                     onDirectDebits = { nav.navigate(Routes.DIRECT_DEBITS) },
-                    onSync = { nav.navigate(Routes.SYNC) },
+                    onSyncStatus = { nav.navigate(Routes.SYNC) },
                     onNotifications = { nav.navigate(Routes.NOTIFICATIONS) },
                 )
             }

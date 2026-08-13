@@ -4,9 +4,16 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
+import uk.co.prisom.directbanking.data.RefreshSignal
 import uk.co.prisom.directbanking.data.repository.Cached
+import uk.co.prisom.directbanking.data.repository.DashboardRepository
 import uk.co.prisom.directbanking.data.repository.InsightsRepository
+import uk.co.prisom.directbanking.data.repository.TransactionRepository
+import uk.co.prisom.directbanking.domain.AccountSummary
+import uk.co.prisom.directbanking.domain.BankSyncStatus
+import uk.co.prisom.directbanking.domain.TransactionSummary
 import uk.co.prisom.directbanking.data.remote.dto.BudgetCreateRequest
 import uk.co.prisom.directbanking.data.remote.dto.BudgetProgressDto
 import uk.co.prisom.directbanking.data.remote.dto.CashFlowForecastDto
@@ -126,6 +133,53 @@ class BudgetsViewModel(private val repo: InsightsRepository) : ViewModel() {
 
     fun delete(id: String) = viewModelScope.launch {
         runCatching { repo.deleteBudget(id) }.onSuccess { refresh() }
+    }
+}
+
+/** Best-effort extras that complement the cached insights overview on Home. */
+data class HomeExtras(
+    val displayName: String? = null,
+    val bankSync: BankSyncStatus = BankSyncStatus(),
+    val accounts: List<AccountSummary> = emptyList(),
+    val recent: List<TransactionSummary> = emptyList(),
+)
+
+/**
+ * Composes the redesigned Home: the insights overview (cached in Room v7, so it
+ * renders offline with a staleness flag) plus best-effort extras (connected-bank
+ * status, per-currency account totals, a short recent-activity list). The overview
+ * is the primary source and never blanks; extras degrade silently when offline.
+ */
+class HomeViewModel(
+    private val insights: InsightsRepository,
+    private val dashboardRepo: DashboardRepository,
+    private val txnRepo: TransactionRepository,
+) : ViewModel() {
+    private val _overview = MutableStateFlow<Async<Cached<InsightsOverviewDto>>>(Async.Loading)
+    val overview = _overview.asStateFlow()
+
+    private val _extras = MutableStateFlow(HomeExtras())
+    val extras = _extras.asStateFlow()
+
+    init {
+        refresh()
+        // Refresh when an auto-import records a transaction (totals may change).
+        viewModelScope.launch { RefreshSignal.tick.drop(1).collect { refresh() } }
+    }
+
+    fun refresh() = viewModelScope.launch {
+        _overview.value = Async.Loading
+        _overview.value = runCatching { insights.overview() }.fold({ Async.Success(it) }, { Async.Failure(err(it)) })
+        // Extras are best-effort: offline failures must not blank the screen.
+        val dash = runCatching { dashboardRepo.load() }.getOrNull()
+        val recent = runCatching { txnRepo.recent(8) }.getOrNull().orEmpty()
+        _extras.value = HomeExtras(
+            displayName = dash?.displayName,
+            bankSync = dash?.bankSync ?: BankSyncStatus(),
+            accounts = dash?.accounts.orEmpty(),
+            // Home shows only a few, and never internal transfers.
+            recent = recent.filter { !it.isInternalTransfer }.take(5),
+        )
     }
 }
 
