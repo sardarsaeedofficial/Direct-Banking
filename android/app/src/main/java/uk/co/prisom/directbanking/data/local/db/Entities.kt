@@ -101,3 +101,17 @@ data class BankConnectionCacheEntity(
     val lastSuccessfulSyncAt: String?,
     val cachedAtMillis: Long,
 )
+
+/**
+ * Phase 4 offline cache of insights payloads (Home overview, budget & recurring
+ * summaries) as raw JSON, keyed by a stable name (e.g. "overview"). Lets those
+ * screens render last-known data without a network round-trip; the backend remains
+ * canonical and staleness is surfaced from cachedAtMillis. Additive — no existing
+ * data is touched.
+ */
+@Entity(tableName = "insights_cache")
+data class InsightsCacheEntity(
+    @PrimaryKey val key: String,
+    val json: String,
+    val cachedAtMillis: Long,
+)

@@ -7,7 +7,6 @@ import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -34,8 +33,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import uk.co.prisom.directbanking.domain.AccountSummary
-import uk.co.prisom.directbanking.domain.DirectDebitSummary
-import uk.co.prisom.directbanking.domain.TransactionSummary
 import uk.co.prisom.directbanking.ui.EmptyState
 import uk.co.prisom.directbanking.ui.LoadingBox
 import uk.co.prisom.directbanking.ui.MessageBox
@@ -43,7 +40,6 @@ import uk.co.prisom.directbanking.ui.money
 import uk.co.prisom.directbanking.ui.session.SessionViewModel
 import uk.co.prisom.directbanking.ui.theme.DirectBankingColors
 import uk.co.prisom.directbanking.ui.vm.Async
-import uk.co.prisom.directbanking.ui.vm.DashboardViewModel
 import uk.co.prisom.directbanking.ui.vm.OverviewViewModel
 import uk.co.prisom.directbanking.ui.vm.SettingsViewModel
 import uk.co.prisom.directbanking.ui.vm.SyncViewModel
@@ -58,110 +54,6 @@ private fun StatCard(label: String, value: String, modifier: Modifier = Modifier
             Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(4.dp))
             Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-        }
-    }
-}
-
-@Composable
-fun DashboardScreen(
-    dashboard: DashboardViewModel,
-    sync: SyncViewModel,
-    onAccounts: () -> Unit = {},
-    onDirectDebits: () -> Unit = {},
-    onSync: () -> Unit = {},
-    onNotifications: () -> Unit = {},
-) {
-    val state by dashboard.state.collectAsStateWithLifecycle()
-    val pending by sync.pendingCount.collectAsStateWithLifecycle()
-    val lastSync by sync.lastSyncAtMillis.collectAsStateWithLifecycle()
-    when (val s = state) {
-        is Async.Loading -> LoadingBox()
-        is Async.Failure -> MessageBox(s.message)
-        is Async.Success -> {
-            val d = s.data
-            val cur = d.baseCurrency
-            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-                Text("Hello${d.displayName?.let { ", $it" } ?: ""}", style = MaterialTheme.typography.headlineSmall)
-                Spacer(Modifier.height(12.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    StatCard("Total balance", money(d.summary.totalBalanceMinor, cur), Modifier.weight(1f))
-                    StatCard("Safe to spend", money(d.summary.safeToSpendMinor, cur), Modifier.weight(1f))
-                }
-                Spacer(Modifier.height(12.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    StatCard("Income this month", money(d.summary.incomeMinor, cur), Modifier.weight(1f))
-                    StatCard("Spent this month", money(d.summary.expenseMinor, cur), Modifier.weight(1f))
-                }
-                Spacer(Modifier.height(12.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    StatCard("Direct Debits this month", money(d.summary.directDebitsThisMonthMinor, cur), Modifier.weight(1f))
-                    StatCard("Upcoming next 30 days", money(d.summary.upcoming30DaysMinor, cur), Modifier.weight(1f))
-                }
-
-                // Upcoming payments (next 7 days) — the prominent Phase 2 Home section.
-                if (d.upcomingPayments.isNotEmpty()) {
-                    Spacer(Modifier.height(16.dp))
-                    Text("Upcoming payments", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("Next 7 days", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.height(8.dp))
-                    Card(Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
-                            d.upcomingPayments.forEach { p ->
-                                Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(p.companyName, style = MaterialTheme.typography.bodyLarge)
-                                        Text(
-                                            listOfNotNull(p.expectedDate?.take(10), p.account).joinToString(" · "),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                    Text((if (p.isRange) "~" else "") + money(p.expectedAmountMinor, cur), fontWeight = FontWeight.SemiBold)
-                                }
-                                HorizontalDivider()
-                            }
-                            Row(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
-                                Text("Expected next 7 days", Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text(money(d.summary.upcoming7DaysMinor, cur), fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(16.dp))
-                // Notification-capture sync and Open Banking sync stay separately diagnosable (§21).
-                Text(
-                    "Notifications synced: " + if (lastSync > 0) DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(lastSync)) else "never",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                val bs = d.bankSync
-                if (bs.connectionCount > 0) {
-                    Text(
-                        when {
-                            bs.needsAttention > 0 -> "${bs.needsAttention} bank${if (bs.needsAttention > 1) "s" else ""} need attention"
-                            bs.lastBankSyncAt != null -> "Banks synced ${bs.lastBankSyncAt.take(10)}"
-                            else -> "Banks connected: ${bs.connectionCount}"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (bs.needsAttention > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Spacer(Modifier.height(16.dp))
-                Text("More", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(8.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onAccounts, modifier = Modifier.weight(1f)) { Text("Accounts") }
-                    OutlinedButton(onClick = onDirectDebits, modifier = Modifier.weight(1f)) { Text("Direct debits") }
-                }
-                Spacer(Modifier.height(8.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onSync, modifier = Modifier.weight(1f)) { Text("Sync status") }
-                    OutlinedButton(onClick = onNotifications, modifier = Modifier.weight(1f)) { Text("Notifications") }
-                }
-                Spacer(Modifier.height(12.dp))
-                OutlinedButton(onClick = { dashboard.refresh() }) { Text("Refresh") }
-            }
         }
     }
 }
@@ -243,11 +135,17 @@ fun SettingsScreen(
     onBankConnections: () -> Unit,
     debugRoute: String?,
     onOpenDebug: () -> Unit,
+    onReview: () -> Unit = {},
+    onManageBudgets: () -> Unit = {},
 ) {
     val context = LocalContext.current
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text("Settings & privacy", style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.height(16.dp))
+        OutlinedButton(onClick = onReview, modifier = Modifier.fillMaxWidth()) { Text("Review imported transactions") }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(onClick = onManageBudgets, modifier = Modifier.fillMaxWidth()) { Text("Manage budgets") }
+        Spacer(Modifier.height(8.dp))
         OutlinedButton(onClick = onBankConnections, modifier = Modifier.fillMaxWidth()) { Text("Bank connections") }
         Spacer(Modifier.height(8.dp))
         OutlinedButton(onClick = onManageSources, modifier = Modifier.fillMaxWidth()) { Text("Approved notification sources") }

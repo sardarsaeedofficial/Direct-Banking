@@ -164,3 +164,15 @@ interface BankConnectionDao {
     @Query("DELETE FROM bank_connection_cache")
     suspend fun clear()
 }
+
+@Dao
+interface InsightsCacheDao {
+    @Query("SELECT * FROM insights_cache WHERE `key` = :key LIMIT 1")
+    suspend fun get(key: String): InsightsCacheEntity?
+
+    @Upsert
+    suspend fun upsert(entity: InsightsCacheEntity)
+
+    @Query("DELETE FROM insights_cache")
+    suspend fun clear()
+}

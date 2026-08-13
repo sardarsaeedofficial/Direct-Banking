@@ -129,4 +129,97 @@ interface MobileApi {
 
     @DELETE("api/mobile/v1/notification-imports/{id}")
     suspend fun deleteImport(@Path("id") id: String): DeletedResponse
+
+    // ── Phase 4 — Insights ────────────────────────────────────────────────────
+    @GET("api/mobile/v1/insights/overview")
+    suspend fun insightsOverview(): uk.co.prisom.directbanking.data.remote.dto.InsightsOverviewDto
+
+    @GET("api/mobile/v1/insights/categories")
+    suspend fun insightsCategories(
+        @Query("period") period: String = "month",
+        @Query("start") start: String? = null,
+        @Query("end") end: String? = null,
+    ): uk.co.prisom.directbanking.data.remote.dto.CategoryBreakdownDto
+
+    @GET("api/mobile/v1/insights/merchants")
+    suspend fun insightsMerchants(
+        @Query("period") period: String = "month",
+        @Query("limit") limit: Int = 10,
+    ): uk.co.prisom.directbanking.data.remote.dto.TopMerchantsDto
+
+    @GET("api/mobile/v1/insights/cash-flow")
+    suspend fun insightsCashFlow(): uk.co.prisom.directbanking.data.remote.dto.CashFlowForecastDto
+
+    @GET("api/mobile/v1/insights/net-worth")
+    suspend fun insightsNetWorth(): uk.co.prisom.directbanking.data.remote.dto.NetWorthDto
+
+    @GET("api/mobile/v1/insights/safe-to-spend")
+    suspend fun insightsSafeToSpend(@Query("reserve") reserve: Long = 0): uk.co.prisom.directbanking.data.remote.dto.SafeToSpendDto
+
+    // ── Phase 4 — Categories & rules ──────────────────────────────────────────
+    @GET("api/mobile/v1/categories")
+    suspend fun listCategories(): uk.co.prisom.directbanking.data.remote.dto.CategoryListResponse
+
+    @POST("api/mobile/v1/categories")
+    suspend fun createCategory(@Body body: uk.co.prisom.directbanking.data.remote.dto.CategoryCreateRequest): uk.co.prisom.directbanking.data.remote.dto.CategoryMutationResponse
+
+    @DELETE("api/mobile/v1/categories/{id}")
+    suspend fun deleteCategory(@Path("id") id: String): DeletedResponse
+
+    @GET("api/mobile/v1/category-rules")
+    suspend fun listCategoryRules(): uk.co.prisom.directbanking.data.remote.dto.CategoryRuleListResponse
+
+    @POST("api/mobile/v1/category-rules")
+    suspend fun createCategoryRule(@Body body: uk.co.prisom.directbanking.data.remote.dto.CategoryRuleCreateRequest): uk.co.prisom.directbanking.data.remote.dto.CategoryRuleMutationResponse
+
+    @DELETE("api/mobile/v1/category-rules/{id}")
+    suspend fun deleteCategoryRule(@Path("id") id: String): DeletedResponse
+
+    // ── Phase 4 — Budgets ─────────────────────────────────────────────────────
+    @GET("api/mobile/v1/budgets")
+    suspend fun listBudgets(): uk.co.prisom.directbanking.data.remote.dto.BudgetListResponse
+
+    @GET("api/mobile/v1/budgets/alerts")
+    suspend fun budgetAlerts(): uk.co.prisom.directbanking.data.remote.dto.BudgetAlertsResponse
+
+    @POST("api/mobile/v1/budgets")
+    suspend fun createBudget(@Body body: uk.co.prisom.directbanking.data.remote.dto.BudgetCreateRequest): uk.co.prisom.directbanking.data.remote.dto.BudgetMutationResponse
+
+    @DELETE("api/mobile/v1/budgets/{id}")
+    suspend fun deleteBudget(@Path("id") id: String): DeletedResponse
+
+    // ── Phase 4 — Recurring payments ──────────────────────────────────────────
+    @GET("api/mobile/v1/recurring-payments")
+    suspend fun recurringPayments(): uk.co.prisom.directbanking.data.remote.dto.RecurringPaymentsViewDto
+
+    @GET("api/mobile/v1/recurring-payments/suggestions")
+    suspend fun recurringSuggestions(): uk.co.prisom.directbanking.data.remote.dto.SubscriptionSuggestionsResponse
+
+    @GET("api/mobile/v1/recurring-payments/{id}")
+    suspend fun recurringPayment(@Path("id") id: String): uk.co.prisom.directbanking.data.remote.dto.RecurringDetailResponse
+
+    @PATCH("api/mobile/v1/recurring-payments/{id}")
+    suspend fun patchRecurringPayment(@Path("id") id: String, @Body body: uk.co.prisom.directbanking.data.remote.dto.RecurringPaymentPatchRequest): uk.co.prisom.directbanking.data.remote.dto.RecurringMutationResponse
+
+    // ── Phase 4 — Merchant profile ────────────────────────────────────────────
+    @GET("api/mobile/v1/merchants/{id}")
+    suspend fun merchantProfile(@Path("id") id: String): uk.co.prisom.directbanking.data.remote.dto.MerchantProfileResponse
+
+    // ── Phase 4 — Activity search (server filters + pagination) ────────────────
+    @GET("api/mobile/v1/activity")
+    suspend fun activity(
+        @Query("q") q: String? = null,
+        @Query("merchantId") merchantId: String? = null,
+        @Query("categoryId") categoryId: String? = null,
+        @Query("accountId") accountId: String? = null,
+        @Query("direction") direction: String? = null,
+        @Query("type") type: String? = null,
+        @Query("settled") settled: String? = null,
+        @Query("minAmount") minAmount: Long? = null,
+        @Query("maxAmount") maxAmount: Long? = null,
+        @Query("from") from: String? = null,
+        @Query("to") to: String? = null,
+        @Query("limit") limit: Int = 50,
+        @Query("offset") offset: Int = 0,
+    ): uk.co.prisom.directbanking.data.remote.dto.ActivityResponse
 }

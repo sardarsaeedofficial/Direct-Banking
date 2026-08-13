@@ -2,6 +2,7 @@ import type { Prisma, TxnDirection, TxnStatus, TxnSource, TxnType } from "@prism
 import { prisma } from "../db.js";
 import { linkMerchant } from "./merchant-normalise.service.js";
 import { dedupeHash } from "./duplicate-detection.service.js";
+import { categorizeTransaction } from "./categorization.service.js";
 import { addDays, absMinor } from "@direct-banking/shared";
 
 export interface CreateTxnInput {
@@ -36,6 +37,13 @@ export interface CreateTxnInput {
   // (balanceApplied=false). Used for provider-authoritative (Open Banking) accounts
   // whose balance comes from the bank, so historical imports never double-count.
   applyBalance?: boolean;
+  // ---- Phase 4: automatic categorisation ----
+  // A trusted provider-supplied category string (Open Banking), used as one input to
+  // the categorisation chain. Never trusted blindly — only clean mappings are applied.
+  providerCategory?: string | null;
+  // When true (default) and no explicit categoryId is supplied, run the categorisation
+  // engine. An explicit categoryId always wins (user-explicit) and disables auto-categorise.
+  autoCategorize?: boolean;
 }
 
 /** Canonical ledger type implied by a coarse direction when none is supplied. */
@@ -99,6 +107,29 @@ export async function createTransaction(userId: string, input: CreateTxnInput, c
     expectedPaymentId = await matchExpectedPayment(userId, input.accountId, amountMinor, input.bookedAt);
   }
 
+  // Categorisation: an explicit categoryId is treated as user-explicit and wins.
+  // Otherwise run the priority chain (rule → learned merchant → provider → heuristic).
+  let categoryId: string | null = input.categoryId ?? null;
+  let subcategoryText: string | null = null;
+  if (!categoryId && (input.autoCategorize ?? true)) {
+    const result = await categorizeTransaction(
+      userId,
+      {
+        merchantName: input.merchantName,
+        description: input.description,
+        recipientName: input.recipientName,
+        senderName: input.senderName,
+        providerCategory: input.providerCategory ?? null,
+        direction: input.direction as "INCOME" | "EXPENSE" | "TRANSFER",
+        transactionType: input.transactionType ?? null,
+        merchantId,
+      },
+      client ?? prisma,
+    );
+    categoryId = result.categoryId;
+    subcategoryText = result.subcategoryName;
+  }
+
   const data: Prisma.TransactionUncheckedCreateInput = {
     userId,
     accountId: input.accountId,
@@ -112,7 +143,8 @@ export async function createTransaction(userId: string, input: CreateTxnInput, c
     notes: input.notes ?? undefined,
     tags: input.tags ?? [],
     merchantId: merchantId ?? undefined,
-    categoryId: input.categoryId ?? undefined,
+    categoryId: categoryId ?? undefined,
+    subcategory: subcategoryText ?? undefined,
     transferAccountId: input.transferAccountId ?? undefined,
     refundOfId: input.refundOfId ?? undefined,
     expectedPaymentId: expectedPaymentId ?? undefined,

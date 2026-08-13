@@ -151,6 +151,39 @@ export const budgetSchema = z.object({
   limitMinor: minorAmount.positive(),
   currency,
   startDate: isoDate,
+  // ---- Phase 4 additions (all optional) ----
+  endDate: isoDate.optional().nullable(),
+  rolloverEnabled: z.boolean().optional(),
+  enabled: z.boolean().optional(),
+  alert50: z.boolean().optional(),
+  alert75: z.boolean().optional(),
+  alert90: z.boolean().optional(),
+  alert100: z.boolean().optional(),
+});
+export const budgetUpdateSchema = budgetSchema.partial();
+export type BudgetInput = z.infer<typeof budgetSchema>;
+
+// Category rules (Phase 4) --------------------------------------------------
+export const RULE_FIELDS = ["MERCHANT", "NORMALIZED_MERCHANT", "DESCRIPTION", "RECIPIENT", "SENDER", "DD_COMPANY"] as const;
+export const RULE_OPERATORS = ["CONTAINS", "EQUALS", "STARTS_WITH"] as const;
+export const categoryRuleSchema = z.object({
+  field: z.enum(RULE_FIELDS),
+  operator: z.enum(RULE_OPERATORS).default("CONTAINS"),
+  value: z.string().min(1).max(200),
+  categoryId: cuid,
+  subcategoryId: cuid.optional().nullable(),
+  priority: z.number().int().min(0).max(10000).optional(),
+  enabled: z.boolean().optional(),
+});
+export const categoryRuleUpdateSchema = categoryRuleSchema.partial();
+export type CategoryRuleInput = z.infer<typeof categoryRuleSchema>;
+
+// Recurring payment (subscription/DD) user actions (Phase 4) ----------------
+export const recurringPaymentPatchSchema = z.object({
+  status: z.enum(DD_STATUSES).optional(),
+  userExpectedAmountMinor: minorAmount.optional().nullable(),
+  userExpectedDate: isoDate.optional().nullable(),
+  notes: z.string().max(1000).optional().nullable(),
 });
 
 // Reminders -----------------------------------------------------------------
