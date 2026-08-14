@@ -38,6 +38,8 @@ import uk.co.prisom.directbanking.ui.screens.DisclosureScreen
 import uk.co.prisom.directbanking.ui.screens.InsightsScreen
 import uk.co.prisom.directbanking.ui.screens.BudgetsScreen
 import uk.co.prisom.directbanking.ui.screens.PaymentsScreen
+import uk.co.prisom.directbanking.ui.screens.StatementImportScreen
+import uk.co.prisom.directbanking.ui.screens.ReviewCentreScreen
 import uk.co.prisom.directbanking.ui.screens.NotificationAccessScreen
 import uk.co.prisom.directbanking.ui.screens.NotificationsScreen
 import uk.co.prisom.directbanking.ui.screens.ReviewImportsScreen
@@ -57,6 +59,8 @@ import uk.co.prisom.directbanking.ui.vm.HomeViewModel
 import uk.co.prisom.directbanking.ui.vm.InsightsViewModel
 import uk.co.prisom.directbanking.ui.vm.BudgetsViewModel
 import uk.co.prisom.directbanking.ui.vm.PaymentsViewModel
+import uk.co.prisom.directbanking.ui.vm.StatementImportViewModel
+import uk.co.prisom.directbanking.ui.vm.ReviewCentreViewModel
 import uk.co.prisom.directbanking.ui.vm.OverviewViewModel
 import uk.co.prisom.directbanking.ui.vm.ReviewViewModel
 import uk.co.prisom.directbanking.ui.vm.SettingsViewModel
@@ -71,6 +75,8 @@ private object Routes {
     const val INSIGHTS = "insights"
     const val BUDGETS = "budgets"
     const val REVIEW = "review"
+    const val REVIEW_CENTRE = "review-centre"
+    const val STATEMENT_IMPORT = "statement-import"
     const val SOURCES = "sources"
     const val SETTINGS = "settings"
     const val ACCOUNTS = "accounts"
@@ -176,6 +182,15 @@ private fun MainNav(session: SessionViewModel) {
             composable(Routes.REVIEW) {
                 ReviewImportsScreen(containerViewModel { ReviewViewModel(it.importRepository, it.authRepository, it.appContext) })
             }
+            composable(Routes.STATEMENT_IMPORT) {
+                StatementImportScreen(
+                    vm = containerViewModel { StatementImportViewModel(it.statementRepository, it.dashboardRepository) },
+                    onDone = { nav.popBackStack() },
+                )
+            }
+            composable(Routes.REVIEW_CENTRE) {
+                ReviewCentreScreen(containerViewModel { ReviewCentreViewModel(it.reviewRepository) })
+            }
             composable(Routes.SOURCES) {
                 SourcesTab(
                     vm = containerViewModel { SourcesViewModel(it.sourceRepository, it.importRepository, it.dashboardRepository, it.appPreferences) },
@@ -195,6 +210,8 @@ private fun MainNav(session: SessionViewModel) {
                     onOpenDebug = { DebugHooks.simulatorRoute?.let { nav.navigate(it) } },
                     onReview = { nav.navigate(Routes.REVIEW) },
                     onManageBudgets = { nav.navigate(Routes.BUDGETS) },
+                    onImportStatement = { nav.navigate(Routes.STATEMENT_IMPORT) },
+                    onReviewCentre = { nav.navigate(Routes.REVIEW_CENTRE) },
                 )
             }
             composable(Routes.BANK_CONNECTIONS) {

@@ -237,6 +237,9 @@ model User {
   mobileTokens  MobileRefreshToken[]
   ddMandates    DirectDebitMandate[]
   bankConnections BankConnection[]
+  statementImports StatementImport[]
+  transactionCorrections TransactionCorrection[]
+  reconciliationDecisions ReconciliationDecision[]
 }
 
 model Session {
@@ -293,6 +296,7 @@ model BankAccount {
   recurring    RecurringPayment[]
   expected     ExpectedPayment[]
   ddMandates   DirectDebitMandate[]
+  statementImports StatementImport[]
 
   @@index([userId])
 }
@@ -618,14 +622,25 @@ model TransactionEvidence {
 
   notificationFingerprint String?
 
+  // ---- Phase 5: statement-import evidence ----
+  // A statement row that evidenced this transaction. rowFingerprint is a normalized
+  // digest of the row (never the raw statement text) and, with statementImportId,
+  // makes re-importing the same file idempotent.
+  statementImportId String?
+  statementImport   StatementImport? @relation(fields: [statementImportId], references: [id], onDelete: SetNull)
+  rowFingerprint    String?
+  rowIndex          Int?
+
   observedAt     DateTime @default(now())
   rawPayloadHash String?
 
   createdAt DateTime @default(now())
 
   @@unique([provider, providerTransactionId])
+  @@unique([statementImportId, rowFingerprint])
   @@index([transactionId])
   @@index([notificationFingerprint])
+  @@index([statementImportId])
 }
 
 model RecurringPayment {
@@ -860,4 +875,145 @@ model AppSetting {
   updatedAt DateTime @updatedAt
 
   @@unique([userId, key])
+}
+
+// ===========================================================================
+// Phase 5 — Statement import, reconciliation review & correction audit
+// ===========================================================================
+
+enum StatementFileType {
+  CSV
+  OFX
+  QIF
+  PDF
+}
+
+enum StatementStatus {
+  UPLOADED
+  PARSED
+  REVIEW_REQUIRED
+  IMPORTED
+  PARTIALLY_IMPORTED
+  FAILED
+}
+
+// How a parsed statement row related to the existing ledger at import time.
+enum StatementCandidateStatus {
+  NEW // will create a new canonical transaction
+  DUPLICATE // already recorded (exact/strong evidence) — skipped
+  REVIEW // a possible match a human should confirm
+  MATCHED // enriched an existing transaction with statement evidence
+  IMPORTED // committed to the ledger
+  EXCLUDED // user removed this row before confirming
+}
+
+// A single fallback statement-import session (CSV/OFX/QIF/text-PDF). Raw uploaded
+// files are NOT persisted; only normalized candidates + metadata are kept.
+model StatementImport {
+  id          String            @id @default(cuid())
+  userId      String
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountId   String
+  account     BankAccount       @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  filename    String
+  fileType    StatementFileType
+  fileHash    String // sha256 of the uploaded bytes — for double-import protection
+  institution String?
+  status      StatementStatus   @default(UPLOADED)
+
+  transactionCount Int @default(0)
+  importedCount    Int @default(0)
+  duplicateCount   Int @default(0)
+  reviewCount      Int @default(0)
+
+  periodStart DateTime?
+  periodEnd   DateTime?
+  error       String?
+
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  candidates StatementCandidate[]
+  evidence   TransactionEvidence[]
+
+  @@unique([userId, accountId, fileHash]) // re-uploading the same file to the same account is idempotent
+  @@index([userId])
+  @@index([userId, accountId])
+}
+
+// A normalized statement row, staged before anything touches the ledger. Only
+// canonical financial fields are stored — never the raw statement document.
+model StatementCandidate {
+  id                String                   @id @default(cuid())
+  statementImportId String
+  statementImport   StatementImport          @relation(fields: [statementImportId], references: [id], onDelete: Cascade)
+  userId            String
+  rowIndex          Int
+  bookedAt          DateTime
+  timeText          String? // time-of-day if the statement provided one
+  amountMinor       BigInt
+  currency          String                   @default("GBP")
+  direction         TxnDirection
+  description       String
+  merchantName      String?
+  senderName        String?
+  recipientName     String?
+  reference         String?
+  balanceAfterMinor BigInt?
+  fingerprint       String // normalized row digest (idempotency / dedupe)
+  reconStatus       StatementCandidateStatus @default(NEW)
+  matchedTransactionId String?
+  excluded          Boolean                  @default(false)
+  createdAt         DateTime                 @default(now())
+
+  @@unique([statementImportId, rowIndex])
+  @@index([statementImportId])
+  @@index([statementImportId, fingerprint])
+}
+
+// A user's explicit "these are NOT the same transaction" decision, so the pair is
+// never auto-merged again. The pair is stored ordered (aId <= bId) for symmetric lookup.
+enum ReconDecisionKind {
+  KEEP_SEPARATE
+}
+
+model ReconciliationDecision {
+  id             String            @id @default(cuid())
+  userId         String
+  user           User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactionAId String
+  transactionBId String
+  decision       ReconDecisionKind @default(KEEP_SEPARATE)
+  createdAt      DateTime          @default(now())
+
+  @@unique([userId, transactionAId, transactionBId])
+  @@index([userId])
+}
+
+// Lightweight, append-only audit of important user corrections. Holds only the
+// changed canonical fields — never provider secrets or raw payloads.
+enum CorrectionAction {
+  CATEGORY_CHANGE
+  MERCHANT_CHANGE
+  MARK_DIRECT_DEBIT
+  UNMARK_DIRECT_DEBIT
+  RECURRING_CLASSIFICATION
+  INTERNAL_TRANSFER_PAIR
+  INTERNAL_TRANSFER_UNPAIR
+  DUPLICATE_MERGE
+  DUPLICATE_KEEP_SEPARATE
+}
+
+model TransactionCorrection {
+  id            String           @id @default(cuid())
+  userId        String
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactionId String? // primary transaction; multi-transaction actions record detail in JSON
+  action        CorrectionAction
+  beforeJson    Json?
+  afterJson     Json?
+  createdAt     DateTime         @default(now())
+
+  @@index([userId, createdAt])
+  @@index([transactionId])
 }

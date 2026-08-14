@@ -8,12 +8,26 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
-// Release signing is read from an untracked keystore.properties (never committed).
-// If absent, release artifacts build unsigned (Play App Signing / manual signing later).
+// Release signing (Phase 5 hardening). Credentials come from either environment
+// variables (CI) or an untracked keystore.properties (local) — a keystore is NEVER
+// committed and passwords are NEVER printed. When no credentials are present, debug
+// builds still work and release artifacts build unsigned (for Play App Signing or
+// manual signing later). When credentials ARE present, assembleRelease produces a
+// properly signed APK.
 val keystorePropsFile = rootProject.file("keystore.properties")
 val keystoreProps = Properties().apply {
     if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
 }
+
+// Environment overrides take precedence over keystore.properties.
+fun signingValue(envName: String, propName: String): String? =
+    (System.getenv(envName) ?: keystoreProps.getProperty(propName))?.takeIf { it.isNotBlank() }
+
+val ksStoreFile = signingValue("DIRECT_BANKING_KEYSTORE_PATH", "storeFile")
+val ksStorePassword = signingValue("DIRECT_BANKING_KEYSTORE_PASSWORD", "storePassword")
+val ksKeyAlias = signingValue("DIRECT_BANKING_KEY_ALIAS", "keyAlias")
+val ksKeyPassword = signingValue("DIRECT_BANKING_KEY_PASSWORD", "keyPassword")
+val releaseSigningReady = ksStoreFile != null && ksStorePassword != null && ksKeyAlias != null && ksKeyPassword != null
 
 android {
     namespace = "uk.co.prisom.directbanking"
@@ -33,12 +47,12 @@ android {
     }
 
     signingConfigs {
-        if (keystoreProps.getProperty("storeFile") != null) {
+        if (releaseSigningReady) {
             create("release") {
-                storeFile = file(keystoreProps.getProperty("storeFile"))
-                storePassword = keystoreProps.getProperty("storePassword")
-                keyAlias = keystoreProps.getProperty("keyAlias")
-                keyPassword = keystoreProps.getProperty("keyPassword")
+                storeFile = file(ksStoreFile!!)
+                storePassword = ksStorePassword
+                keyAlias = ksKeyAlias
+                keyPassword = ksKeyPassword
             }
         }
     }
@@ -52,6 +66,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Signed only when credentials are supplied; otherwise unsigned (still builds).
             signingConfig = signingConfigs.findByName("release")
         }
     }
