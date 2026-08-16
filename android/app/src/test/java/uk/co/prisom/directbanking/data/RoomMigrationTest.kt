@@ -1,10 +1,12 @@
 package uk.co.prisom.directbanking.data
 
 import android.app.Application
+import androidx.room.Room
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -41,6 +43,12 @@ class RoomMigrationTest {
                             "`merchant` TEXT, `accountHint` TEXT, `occurredAtMillis` INTEGER NOT NULL, `confidence` REAL NOT NULL, " +
                             "`reviewState` TEXT NOT NULL, `redactedText` TEXT NOT NULL, `title` TEXT NOT NULL, " +
                             "`localStatus` TEXT NOT NULL, `remoteId` TEXT, `createdAtMillis` INTEGER NOT NULL, PRIMARY KEY(`fingerprint`))",
+                    )
+                    // The fourth v1 table (unchanged by any migration since — present at every version).
+                    db.execSQL(
+                        "CREATE TABLE `captured_notification` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                            "`sourcePackage` TEXT NOT NULL, `postTime` INTEGER NOT NULL, `title` TEXT, " +
+                            "`redactedText` TEXT NOT NULL, `capturedAtMillis` INTEGER NOT NULL, `processed` INTEGER NOT NULL)",
                     )
                 }
                 override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
@@ -171,6 +179,55 @@ class RoomMigrationTest {
             c.moveToFirst()
             assertEquals("{\"safeToSpend\":{}}", c.getString(0))
             assertEquals(1000, c.getInt(1))
+        }
+        db.close()
+    }
+
+    /**
+     * Phase 6 §20: simulates upgrading an installation that has been sitting at
+     * the very first Room schema (v1) — e.g. a user who installed long ago and
+     * is now doing `adb install -r` straight to the current APK, never
+     * uninstalling. Seeds real v1 data, then opens the SAME on-disk database
+     * through Room's real migration runner (not by invoking each `Migration`
+     * object by hand, unlike the pairwise tests above) with the full
+     * `ALL_MIGRATIONS` list, exactly as `DirectBankingDatabase.build()` does in
+     * production. Confirms the chain 1→2→3→4→5→6→7 runs end-to-end, old data
+     * survives the whole journey, and the database is fully usable at v7
+     * afterward (no destructive fallback is configured, so any migration gap
+     * would throw here rather than silently wiping data).
+     */
+    @Test
+    fun `full chain v1 to v7 upgrade preserves existing data and lands on a usable v7 database`() {
+        val name = "mig-test-full-chain.db"
+        // Seed a v1 database with the same shape a real early install would have.
+        val v1 = openV1(name)
+        v1.execSQL("INSERT INTO approved_source VALUES ('com.monzo.app', 'Monzo', 1, 100, 200)")
+        v1.execSQL("INSERT INTO parsed_import VALUES ('fp-chain','com.monzo.app','EXPENSE',4599,'GBP','Tesco',NULL,1000,0.9,'DRAFT','txt','Tesco','LOCAL',NULL,500)")
+        v1.close()
+
+        // Open the same file through Room's real upgrade path.
+        val db = Room.databaseBuilder(context, DirectBankingDatabase::class.java, name)
+            .addMigrations(*DirectBankingDatabase.ALL_MIGRATIONS)
+            .build()
+        // Force Room to actually open (and therefore migrate) the database now.
+        val opened = db.openHelper.writableDatabase
+        assertEquals(7, opened.version)
+
+        // Pre-v7 data survived the entire chain.
+        opened.query("SELECT approved FROM approved_source WHERE packageName='com.monzo.app'").use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals(1, c.getInt(0))
+        }
+        opened.query("SELECT amountMinor FROM parsed_import WHERE fingerprint='fp-chain'").use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals(4599, c.getInt(0))
+        }
+
+        // The v7 table (added by the last migration in the chain) is present and usable.
+        opened.execSQL("INSERT INTO insights_cache VALUES ('chain-check','{}',42)")
+        opened.query("SELECT cachedAtMillis FROM insights_cache WHERE `key`='chain-check'").use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals(42, c.getInt(0))
         }
         db.close()
     }

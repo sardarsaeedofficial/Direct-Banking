@@ -1123,10 +1123,12 @@ mobileRouter.delete(
     if (!existing) throw new HttpError(404, "Category not found");
     if (existing.isSystem) throw new HttpError(400, "Default categories cannot be deleted");
     // Detach references before deleting (rules cascade automatically). Transactions and
-    // budgets keep their history but lose the category link; children reparent to root.
+    // budgets keep their history but lose the category link; children reparent to root;
+    // a merchant's learned default category is cleared rather than left dangling.
     await prisma.transaction.updateMany({ where: { userId, categoryId: existing.id }, data: { categoryId: null } });
     await prisma.budget.updateMany({ where: { userId, categoryId: existing.id }, data: { categoryId: null } });
     await prisma.category.updateMany({ where: { userId, parentId: existing.id }, data: { parentId: null } });
+    await prisma.merchant.updateMany({ where: { userId, defaultCategoryId: existing.id }, data: { defaultCategoryId: null } });
     await prisma.category.delete({ where: { id: existing.id } });
     res.json({ deleted: true });
   }),

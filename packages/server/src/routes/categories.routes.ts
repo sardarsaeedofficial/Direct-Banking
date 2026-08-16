@@ -46,6 +46,24 @@ categoriesRouter.delete(
   asyncHandler(async (req, res) => {
     const existing = await prisma.category.findFirst({ where: { id: req.params.id, userId: req.auth!.userId } });
     if (!existing) throw new HttpError(404, "Category not found");
+    // A category referenced by transactions/rules/budgets/merchants/subcategories
+    // cannot be deleted without leaving those rows in an inconsistent state — the
+    // database's foreign-key constraint would already prevent it, but check first
+    // so the client gets a clear, actionable error instead of a raw DB failure
+    // (Phase 6 audit: mirrors the same guard accounts.routes.ts already applies).
+    const [txnCount, ruleCount, budgetCount, merchantCount, childCount] = await Promise.all([
+      prisma.transaction.count({ where: { categoryId: existing.id } }),
+      prisma.categoryRule.count({ where: { categoryId: existing.id } }),
+      prisma.budget.count({ where: { categoryId: existing.id } }),
+      prisma.merchant.count({ where: { defaultCategoryId: existing.id } }),
+      prisma.category.count({ where: { parentId: existing.id } }),
+    ]);
+    const inUse = txnCount + ruleCount + budgetCount + merchantCount + childCount;
+    if (inUse > 0) {
+      throw new HttpError(409, "Category is in use and cannot be deleted", {
+        transactions: txnCount, rules: ruleCount, budgets: budgetCount, merchants: merchantCount, subcategories: childCount,
+      });
+    }
     await prisma.category.delete({ where: { id: existing.id } });
     res.json({ deleted: true });
   }),
