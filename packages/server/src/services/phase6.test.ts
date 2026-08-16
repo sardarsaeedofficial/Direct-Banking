@@ -273,3 +273,39 @@ describe("Phase 6 — corrections audit never itself applies a balance effect", 
     expect(audit).toBeTruthy();
   });
 });
+
+describe("Phase 6 — canonical-ledger re-audit: rollbackBatch reverses balance before deleting", () => {
+  it("rolling back a CSV import batch restores the pre-import balance exactly", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const u = await newUser();
+    const a = await account(u.id, { balanceMinor: 500000n });
+    const mapping = { accountId: a.id, hasHeader: true, dateFormat: "DMY" as const, columns: { date: 0, description: 1, amount: 2 } };
+    const text = "Date,Description,Amount\n10/08/2026,Tesco,-42.00\n11/08/2026,Salary,2000.00";
+    const result = await svc.csv.commitCsv(u.id, text, mapping, "rollback-test.csv", true);
+    expect(result.imported).toBe(2);
+    const afterImport = await prisma.bankAccount.findUnique({ where: { id: a.id } });
+    expect(afterImport.balanceMinor).toBe(695800n); // 500000 - 4200 + 200000
+
+    const deletedCount = await svc.csv.rollbackBatch(u.id, result.batchId);
+    expect(deletedCount).toBe(2);
+    const afterRollback = await prisma.bankAccount.findUnique({ where: { id: a.id } });
+    // Before this fix, rollback deleted the rows without reversing their balance
+    // effect, permanently corrupting the balance at 695800 instead of restoring
+    // the original 500000.
+    expect(afterRollback.balanceMinor).toBe(500000n);
+    const remaining = await prisma.transaction.count({ where: { userId: u.id, importBatchId: result.batchId } });
+    expect(remaining).toBe(0);
+  });
+
+  it("does not move a PROVIDER-authoritative account's balance, and reversal is a no-op for it either", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const u = await newUser();
+    const a = await account(u.id, { balanceAuthority: "PROVIDER", balanceMinor: 300000n });
+    const mapping = { accountId: a.id, hasHeader: true, dateFormat: "DMY" as const, columns: { date: 0, description: 1, amount: 2 } };
+    const text = "Date,Description,Amount\n10/08/2026,Tesco,-42.00";
+    const result = await svc.csv.commitCsv(u.id, text, mapping, "provider-rollback.csv", true);
+    await svc.csv.rollbackBatch(u.id, result.batchId);
+    const after = await prisma.bankAccount.findUnique({ where: { id: a.id } });
+    expect(after.balanceMinor).toBe(300000n); // untouched throughout
+  });
+});
