@@ -19,7 +19,11 @@ export function openBankingEnabled(): boolean {
   return env.OPEN_BANKING_ENABLED;
 }
 
-/** The configured provider, or null when Open Banking is not usable. */
+/** The configured provider, or null when Open Banking is not usable. Never
+ *  falls through to a default provider — OPEN_BANKING_PROVIDER has no
+ *  default value (see env.ts) and must match exactly one recognised
+ *  provider name, or this returns null just like any other missing
+ *  configuration. */
 export function getProvider(): BankDataProvider | null {
   if (override) return override;
   if (cached) return cached;
@@ -49,46 +53,106 @@ export function returnUri(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Readiness (§39/§40) — a safe, non-secret summary of why Bank Connections
-// can or cannot start, so Android never has to guess from a single generic
-// 503. Traced root cause of "Bank Connections not working" in the current
-// default configuration: OPEN_BANKING_ENABLED defaults to false (the
-// documented, intentional safe production state — see docs/OPEN_BANKING.md),
-// AND separately, OPEN_BANKING_PROVIDER defaults to "truelayer" — so even
-// once OPEN_BANKING_ENABLED=true is set, forgetting to also set
-// OPEN_BANKING_PROVIDER=plaid (this app's actual integrated provider, via the
-// Android Plaid Link SDK) silently selects the wrong provider and still
-// reports "not enabled", with no indication that the *provider selection*,
-// not just the feature flag, is the problem. Never returns a credential
-// value — only which named variables are missing.
+// Readiness (§39/§40, hardened) — a safe, non-secret summary of why Bank
+// Connections can or cannot start, so Android never has to guess from a
+// single generic 503. Traced root cause of "Bank Connections not working":
+// OPEN_BANKING_ENABLED defaults to false (the documented, intentional safe
+// production state — see docs/OPEN_BANKING.md); separately,
+// OPEN_BANKING_PROVIDER used to default to "truelayer" even though this
+// app's Android integration is Plaid, so enabling the flag without also
+// naming a provider would silently select the wrong one. Fixed at the
+// source: OPEN_BANKING_PROVIDER has NO default (env.ts) — an operator must
+// explicitly write OPEN_BANKING_PROVIDER=plaid or =truelayer once enabled,
+// or readiness reports NOT_CONFIGURED rather than guessing. Never returns a
+// credential value — only which named variables are missing.
 // ---------------------------------------------------------------------------
+
+export type OpenBankingReadinessReason = "DISABLED" | "NOT_CONFIGURED" | "READY";
 
 export interface OpenBankingReadiness {
   enabled: boolean;
-  provider: string;
-  environment: string;
+  provider: string | null;
+  environment: string | null;
   configured: boolean;
+  reason: OpenBankingReadinessReason;
   missing: string[];
 }
 
-export function getReadiness(): OpenBankingReadiness {
-  const enabled = env.OPEN_BANKING_ENABLED;
-  const provider = env.OPEN_BANKING_PROVIDER;
-  const missing: string[] = [];
-  let environment = "unknown";
+// OPEN_BANKING_DATA_KEY encrypts connection material regardless of which
+// provider is active (see crypto.ts) — required for both.
+const PLAID_REQUIRED_VARS = ["PLAID_CLIENT_ID", "PLAID_SECRET", "PLAID_WEBHOOK_URI", "OPEN_BANKING_DATA_KEY"] as const;
+const TRUELAYER_REQUIRED_VARS = ["TRUELAYER_CLIENT_ID", "TRUELAYER_CLIENT_SECRET", "TRUELAYER_RETURN_URI", "OPEN_BANKING_DATA_KEY"] as const;
 
-  if (provider === "plaid") {
-    environment = env.PLAID_ENV;
-    if (!env.PLAID_CLIENT_ID) missing.push("PLAID_CLIENT_ID");
-    if (!env.PLAID_SECRET) missing.push("PLAID_SECRET");
-  } else if (provider === "truelayer") {
-    environment = env.TRUELAYER_ENV;
-    if (!env.TRUELAYER_CLIENT_ID) missing.push("TRUELAYER_CLIENT_ID");
-    if (!env.TRUELAYER_CLIENT_SECRET) missing.push("TRUELAYER_CLIENT_SECRET");
-    if (!env.TRUELAYER_RETURN_URI) missing.push("TRUELAYER_RETURN_URI");
-  } else {
-    missing.push("OPEN_BANKING_PROVIDER"); // set, but not a recognised provider name
+// Exported for tests/documentation — never used to guess a provider.
+export const OPEN_BANKING_PROVIDER_REQUIREMENTS = { plaid: PLAID_REQUIRED_VARS, truelayer: TRUELAYER_REQUIRED_VARS };
+
+export interface OpenBankingConfigInput {
+  enabled: boolean;
+  provider?: string;
+  plaidEnv?: string;
+  plaidClientId?: string;
+  plaidSecret?: string;
+  plaidWebhookUri?: string;
+  openBankingDataKey?: string;
+  truelayerEnv?: string;
+  truelayerClientId?: string;
+  truelayerClientSecret?: string;
+  truelayerReturnUri?: string;
+}
+
+/**
+ * Pure decision logic, independent of the process-wide env singleton — this
+ * is what actually implements the readiness rules, and it's what tests
+ * exercise directly (with fabricated, never-real config) rather than trying
+ * to re-parse process.env per test case. getReadiness() below is the only
+ * caller that feeds it the real environment.
+ */
+export function computeReadiness(cfg: OpenBankingConfigInput): OpenBankingReadiness {
+  const provider = cfg.provider ?? null;
+
+  if (!cfg.enabled) {
+    return { enabled: false, provider, environment: null, configured: false, reason: "DISABLED", missing: [] };
   }
 
-  return { enabled, provider, environment, configured: enabled && missing.length === 0, missing };
+  if (provider !== "plaid" && provider !== "truelayer") {
+    // Enabled, but no provider explicitly chosen (or an unrecognised value) —
+    // never silently assume one.
+    return { enabled: true, provider, environment: null, configured: false, reason: "NOT_CONFIGURED", missing: ["OPEN_BANKING_PROVIDER"] };
+  }
+
+  const missing: string[] = [];
+  let environment: string;
+  if (provider === "plaid") {
+    environment = cfg.plaidEnv ?? "sandbox";
+    if (!cfg.plaidClientId) missing.push("PLAID_CLIENT_ID");
+    if (!cfg.plaidSecret) missing.push("PLAID_SECRET");
+    if (!cfg.plaidWebhookUri) missing.push("PLAID_WEBHOOK_URI");
+    if (!cfg.openBankingDataKey) missing.push("OPEN_BANKING_DATA_KEY");
+  } else {
+    // provider === "truelayer" — Plaid variables are never required here.
+    environment = cfg.truelayerEnv ?? "sandbox";
+    if (!cfg.truelayerClientId) missing.push("TRUELAYER_CLIENT_ID");
+    if (!cfg.truelayerClientSecret) missing.push("TRUELAYER_CLIENT_SECRET");
+    if (!cfg.truelayerReturnUri) missing.push("TRUELAYER_RETURN_URI");
+    if (!cfg.openBankingDataKey) missing.push("OPEN_BANKING_DATA_KEY");
+  }
+
+  const configured = missing.length === 0;
+  return { enabled: true, provider, environment, configured, reason: configured ? "READY" : "NOT_CONFIGURED", missing };
+}
+
+export function getReadiness(): OpenBankingReadiness {
+  return computeReadiness({
+    enabled: env.OPEN_BANKING_ENABLED,
+    provider: env.OPEN_BANKING_PROVIDER,
+    plaidEnv: env.PLAID_ENV,
+    plaidClientId: env.PLAID_CLIENT_ID,
+    plaidSecret: env.PLAID_SECRET,
+    plaidWebhookUri: env.PLAID_WEBHOOK_URI,
+    openBankingDataKey: env.OPEN_BANKING_DATA_KEY,
+    truelayerEnv: env.TRUELAYER_ENV,
+    truelayerClientId: env.TRUELAYER_CLIENT_ID,
+    truelayerClientSecret: env.TRUELAYER_CLIENT_SECRET,
+    truelayerReturnUri: env.TRUELAYER_RETURN_URI,
+  });
 }

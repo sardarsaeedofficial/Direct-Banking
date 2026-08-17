@@ -18,6 +18,14 @@ object ApiFactory {
         ignoreUnknownKeys = true
         explicitNulls = false
         encodeDefaults = true
+        // The unified Activity item (Financial Event Intelligence round 2) mixes
+        // Transaction and FinancialEvent rows in one response shape; several
+        // fields that are always present for one kind (e.g. `direction`,
+        // `provider`/`environment` on the readiness DTO) are legitimately null
+        // for the other. Rather than making every shared field nullable end to
+        // end, accept a JSON null for a non-nullable property that declares a
+        // Kotlin default and fall back to that default instead of throwing.
+        coerceInputValues = true
     }
 
     fun create(baseUrl: String, tokenStore: TokenStore, debug: Boolean): ApiClients {

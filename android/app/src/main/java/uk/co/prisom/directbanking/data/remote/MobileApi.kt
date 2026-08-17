@@ -273,6 +273,9 @@ interface MobileApi {
         @Query("maxAmount") maxAmount: Long? = null,
         @Query("from") from: String? = null,
         @Query("to") to: String? = null,
+        // "all" | "completed" | "pending" | "upcoming" | "declined_failed" — the
+        // compact lifecycle selector (round-2 §3), a separate axis from `type`.
+        @Query("lifecycle") lifecycle: String? = null,
         @Query("limit") limit: Int = 50,
         @Query("offset") offset: Int = 0,
     ): uk.co.prisom.directbanking.data.remote.dto.ActivityResponse

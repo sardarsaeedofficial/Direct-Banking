@@ -90,7 +90,23 @@ data class TransactionSummary(
     val settledAt: String? = null,
     val internalTransferGroupId: String? = null,
     val internalTransferConfidence: String? = null,
+    // ---- Unified Activity item fields (Financial Event Intelligence round 2) ----
+    // `kind`/`lifecycle` are the two fields the UI renders off; everything else
+    // here is only ever populated for kind == "FINANCIAL_EVENT" (a non-posted
+    // notification-derived event, never a real ledger row).
+    val kind: String = "TRANSACTION", // "TRANSACTION" | "FINANCIAL_EVENT"
+    val eventKind: String? = null,
+    val lifecycle: String = "COMPLETED",
+    val expectedAt: String? = null,
+    val ledgerPosted: Boolean = true,
+    val reasonCode: String? = null,
+    val paymentRail: String? = null,
 ) {
     val isInternalTransfer: Boolean get() = transactionType == "INTERNAL_TRANSFER"
     val isPossibleTransfer: Boolean get() = internalTransferConfidence == "POSSIBLE" && !isInternalTransfer
+    val isFinancialEvent: Boolean get() = kind == "FINANCIAL_EVENT"
+    // CREDIT_CARD_REPAYMENT is a distinct economic type from ordinary spending
+    // (§9 acceptance criteria) — it moves cash but must never render or be
+    // labelled as Income, on either a Transaction or a FinancialEvent row.
+    val isCreditCardRepayment: Boolean get() = transactionType == "CREDIT_CARD_REPAYMENT" || eventKind == "CREDIT_CARD_REPAYMENT"
 }

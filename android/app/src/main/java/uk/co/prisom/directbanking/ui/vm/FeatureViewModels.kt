@@ -73,6 +73,22 @@ enum class ActivityFilter(val label: String) {
     REFUNDS("Refunds"),
 }
 
+/**
+ * The compact lifecycle selector (round-2 §3) — a SEPARATE axis from
+ * [ActivityFilter] above, so existing Income/Spending/Internal-transfer/etc.
+ * filtering keeps working exactly as before. This one is sent to the server
+ * (it decides whether non-posted FinancialEvents are fetched at all), while
+ * [ActivityFilter] and search continue to be applied client-side over
+ * whatever page comes back.
+ */
+enum class ActivityLifecycleFilter(val label: String, val query: String?) {
+    ALL("All", null),
+    COMPLETED("Completed", "completed"),
+    PENDING("Pending", "pending"),
+    UPCOMING("Upcoming", "upcoming"),
+    DECLINED_FAILED("Declined/Failed", "declined_failed"),
+}
+
 class TransactionsViewModel(
     private val repo: TransactionRepository,
     private val dashboardRepository: DashboardRepository,
@@ -80,11 +96,13 @@ class TransactionsViewModel(
     private val all = MutableStateFlow<Async<List<TransactionSummary>>>(Async.Loading)
 
     val filter = MutableStateFlow(ActivityFilter.ALL)
+    val lifecycleFilter = MutableStateFlow(ActivityLifecycleFilter.ALL)
     val query = MutableStateFlow("")
     val accounts = MutableStateFlow<List<AccountSummary>>(emptyList())
     val selected = MutableStateFlow<TransactionSummary?>(null)
 
-    /** The list after applying the active filter tab and the search query. */
+    /** The list after applying the active type filter tab and the search query
+     *  (the lifecycle filter is already applied server-side, see [refresh]). */
     val state: StateFlow<Async<List<TransactionSummary>>> =
         combine(all, filter, query) { a, f, q ->
             when (a) {
@@ -98,16 +116,21 @@ class TransactionsViewModel(
 
     fun refresh() = viewModelScope.launch {
         all.value = Async.Loading
-        all.value = runCatching { repo.recent(200) }.fold({ Async.Success(it) }, { Async.Failure(errorText(it)) })
+        all.value = runCatching { repo.activity(lifecycle = lifecycleFilter.value.query, limit = 200) }
+            .fold({ Async.Success(it) }, { Async.Failure(errorText(it)) })
         runCatching { dashboardRepository.load().accounts }.onSuccess { accounts.value = it }
     }
 
     fun setFilter(f: ActivityFilter) { filter.value = f }
+    /** The lifecycle axis is server-side, so changing it re-fetches. */
+    fun setLifecycleFilter(f: ActivityLifecycleFilter) { lifecycleFilter.value = f; refresh() }
     fun setQuery(q: String) { query.value = q }
     fun open(t: TransactionSummary) { selected.value = t }
     fun close() { selected.value = null }
 
-    /** Mark (or undo) "this is a transfer between my accounts", then refresh totals. */
+    /** Mark (or undo) "this is a transfer between my accounts", then refresh totals.
+     *  Only meaningful for a posted Transaction — never called for a
+     *  FinancialEvent row (the detail screen hides the control for those). */
     fun setInternalTransfer(id: String, internal: Boolean, counterpartyAccountId: String? = null) = viewModelScope.launch {
         runCatching { repo.setInternalTransfer(id, internal, counterpartyAccountId) }.onSuccess { applyUpdate(it) }
     }
@@ -127,12 +150,13 @@ class TransactionsViewModel(
 
     private fun matches(t: TransactionSummary, f: ActivityFilter): Boolean = when (f) {
         ActivityFilter.ALL -> true
-        ActivityFilter.INCOME -> t.direction == "INCOME" && !t.isInternalTransfer
-        ActivityFilter.SPENDING -> t.direction == "EXPENSE" && !t.isInternalTransfer
+        ActivityFilter.INCOME -> t.direction == "INCOME" && !t.isInternalTransfer && !t.isCreditCardRepayment
+        ActivityFilter.SPENDING -> t.direction == "EXPENSE" && !t.isInternalTransfer && !t.isCreditCardRepayment
         ActivityFilter.INTERNAL -> t.isInternalTransfer
-        ActivityFilter.DIRECT_DEBITS -> t.transactionType == "DIRECT_DEBIT" || t.transactionType == "STANDING_ORDER"
+        ActivityFilter.DIRECT_DEBITS -> t.transactionType == "DIRECT_DEBIT" || t.transactionType == "STANDING_ORDER" ||
+            t.eventKind == "DIRECT_DEBIT" || t.eventKind == "STANDING_ORDER"
         ActivityFilter.TRANSFERS -> t.transactionType == "TRANSFER" || t.isInternalTransfer || t.direction == "TRANSFER"
-        ActivityFilter.REFUNDS -> t.transactionType == "REFUND" || t.status == "REFUNDED"
+        ActivityFilter.REFUNDS -> t.transactionType == "REFUND" || t.status == "REFUNDED" || t.lifecycle == "REFUNDED"
     }
 
     private fun searchMatches(t: TransactionSummary, q: String): Boolean {

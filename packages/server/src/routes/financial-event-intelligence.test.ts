@@ -501,25 +501,148 @@ describe("Financial Event Intelligence — historical suspicious-record review",
 });
 
 describe("Financial Event Intelligence — Bank Connections readiness", () => {
-  it("readiness endpoint reports disabled/not-configured state without leaking credentials", async (ctx) => {
+  it("readiness endpoint reports DISABLED in this test environment (no OPEN_BANKING_* vars set) without leaking credentials", async (ctx) => {
     if (!ready) return ctx.skip();
     const { accessToken } = await register();
     const res = await api("GET", "/bank-connections/readiness", { token: accessToken });
     expect(res.status).toBe(200);
     expect(typeof res.json.enabled).toBe("boolean");
-    expect(typeof res.json.provider).toBe("string");
+    expect(res.json.enabled).toBe(false);
+    expect(res.json.reason).toBe("DISABLED");
+    expect(res.json.configured).toBe(false);
+    // Never silently assumes a provider — OPEN_BANKING_PROVIDER has no
+    // default (the exact bug this round's brief asked to close).
+    expect(res.json.provider).toBeNull();
     expect(Array.isArray(res.json.missing)).toBe(true);
     // Never a raw secret value — only variable names in `missing`.
     const asText = JSON.stringify(res.json);
     expect(asText).not.toMatch(/sk_live|sk_test|BEGIN PRIVATE KEY/i);
   });
 
-  it("bank-connections/start returns a distinguishable reason when Open Banking is disabled", async (ctx) => {
+  it("bank-connections/start returns a distinguishable DISABLED reason when Open Banking is disabled", async (ctx) => {
     if (!ready) return ctx.skip();
     const { accessToken } = await register();
     const res = await api("POST", "/bank-connections/start", { token: accessToken });
     // In this test environment Open Banking is disabled by default (no env vars set).
     expect(res.status).toBe(503);
-    expect(res.json.details?.reason ?? res.json.reason).toBeTruthy();
+    expect(res.json.details?.reason ?? res.json.reason).toBe("DISABLED");
+  });
+});
+
+describe("Financial Event Intelligence — unified Activity API (§4 dedup + §3 lifecycle filters)", () => {
+  // A single shared user/account for the whole block (rather than one
+  // register() per scenario) — /auth/register sits behind authLimiter (20
+  // per 15 min, see middleware/rateLimit.ts), and this file already spends a
+  // good chunk of that budget on the describe blocks above. The scenarios
+  // below are independent notifications on one account, so nothing about the
+  // assertions requires separate users.
+  it("dedup, lifecycle filters (upcoming/declined/pending/completed/all), and existing type filters all behave correctly together", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const { userId, accessToken } = await register();
+    const acc = await newAccount(userId, 500000n);
+
+    // 1) A completed purchase — its FinancialEvent gets linked to the
+    // Transaction it posted, so the dedup rule (§4) must hide the event and
+    // show only the canonical Transaction.
+    const purchase = await auto(accessToken, {
+      sourcePackage: "co.uk.monzo", title: "Monzo",
+      redactedSourceText: "You spent £18.30 at Tesco",
+      direction: "EXPENSE", amountMinor: 1830, merchant: "Tesco", accountId: acc.id,
+    });
+    expect(purchase.status).toBe(201);
+    expect(purchase.json.result).toBe("AUTO_IMPORTED");
+    const txnId = purchase.json.transaction.id as string;
+    const linkedEvent = await prisma.financialEvent.findFirst({ where: { userId, linkedTransactionId: txnId } });
+    expect(linkedEvent).toBeTruthy(); // really was linked — otherwise the dedup check below is vacuous
+    expect(linkedEvent.lifecycle).toBe("COMPLETED");
+
+    // 2) An UPCOMING credit-card repayment — never becomes a Transaction.
+    const upcomingRes = await auto(accessToken, {
+      sourcePackage: "unknown.zable", title: "Zable",
+      redactedSourceText: "We'll take your monthly repayment of £254.43 from your Monzo account ending with 2815 on August 20th",
+      direction: "EXPENSE", amountMinor: 25443, merchant: "Zable", accountId: acc.id,
+      occurredAt: "2026-08-15T10:00:00.000Z",
+    });
+    expect(upcomingRes.status).toBe(201);
+    expect(upcomingRes.json.result).toBe("UPCOMING_RECORDED");
+
+    // 3) A DECLINED payment — never becomes a Transaction, never posts.
+    const declinedRes = await auto(accessToken, {
+      sourcePackage: "com.aliexpress", title: "AliExpress",
+      redactedSourceText: "Your AliExpress payment of £35.83 was declined",
+      direction: "EXPENSE", amountMinor: 3583, merchant: "AliExpress", accountId: acc.id,
+    });
+    expect(declinedRes.status).toBe(201);
+
+    // 4) A PENDING card hold, still unsettled.
+    const pendingRes = await auto(accessToken, {
+      sourcePackage: "co.uk.monzo", title: "Monzo",
+      redactedSourceText: "Your card payment to Amazon is pending",
+      direction: "EXPENSE", amountMinor: 2499, merchant: "Amazon", accountId: acc.id,
+    });
+    expect(pendingRes.status).toBe(201);
+
+    // -- Dedup: the Tesco Transaction appears exactly once, never alongside
+    // its own (now-linked) FinancialEvent. --
+    const tescoRes = await api("GET", "/activity?lifecycle=all&q=Tesco", { token: accessToken });
+    expect(tescoRes.status).toBe(200);
+    const tescoMatches = tescoRes.json.items.filter((i: any) => i.displayName === "Tesco" || i.merchant?.displayName === "Tesco");
+    expect(tescoMatches.length).toBe(1);
+    expect(tescoMatches[0].kind).toBe("TRANSACTION");
+    expect(tescoMatches[0].id).toBe(txnId);
+    expect(tescoMatches[0].lifecycle).toBe("COMPLETED");
+    expect(tescoMatches[0].ledgerPosted).toBe(true);
+
+    // -- lifecycle=upcoming: surfaces the FinancialEvent directly, no
+    // manufactured Transaction (§4). --
+    const upcoming = await api("GET", "/activity?lifecycle=upcoming", { token: accessToken });
+    expect(upcoming.status).toBe(200);
+    const zableItem = upcoming.json.items.find((i: any) => i.displayName === "Zable");
+    expect(zableItem).toBeTruthy();
+    expect(zableItem.kind).toBe("FINANCIAL_EVENT");
+    expect(zableItem.eventKind).toBe("CREDIT_CARD_REPAYMENT");
+    expect(zableItem.lifecycle).toBe("UPCOMING");
+    expect(zableItem.ledgerPosted).toBe(false);
+    expect(zableItem.amountMinor).toBe(25443);
+
+    // -- lifecycle=declined_failed: surfaces the declined event. --
+    const declined = await api("GET", "/activity?lifecycle=declined_failed", { token: accessToken });
+    expect(declined.status).toBe(200);
+    const aliItem = declined.json.items.find((i: any) => i.displayName === "AliExpress");
+    expect(aliItem).toBeTruthy();
+    expect(aliItem.kind).toBe("FINANCIAL_EVENT");
+    expect(aliItem.lifecycle).toBe("DECLINED");
+    expect(aliItem.ledgerPosted).toBe(false);
+
+    // -- lifecycle=pending: surfaces the pending event, excludes completed. --
+    const pending = await api("GET", "/activity?lifecycle=pending", { token: accessToken });
+    expect(pending.status).toBe(200);
+    expect(pending.json.items.some((i: any) => i.displayName === "Amazon" && i.lifecycle === "PENDING")).toBe(true);
+    expect(pending.json.items.some((i: any) => i.displayName === "Tesco")).toBe(false);
+
+    // -- lifecycle=completed (pre-existing behaviour, Transactions only):
+    // never shows UPCOMING/DECLINED/PENDING events, only the posted Tesco
+    // transaction. --
+    const completed = await api("GET", "/activity?lifecycle=completed", { token: accessToken });
+    expect(completed.status).toBe(200);
+    expect(completed.json.items.some((i: any) => i.displayName === "Zable")).toBe(false);
+    expect(completed.json.items.some((i: any) => i.displayName === "AliExpress")).toBe(false);
+    expect(completed.json.items.some((i: any) => i.displayName === "Amazon")).toBe(false);
+    expect(completed.json.items.some((i: any) => i.displayName === "Tesco" && i.kind === "TRANSACTION")).toBe(true);
+
+    // -- lifecycle=all (default): mixes posted transactions and non-posted
+    // events together, still deduplicated. --
+    const all = await api("GET", "/activity?lifecycle=all", { token: accessToken });
+    expect(all.status).toBe(200);
+    expect(all.json.items.some((i: any) => i.displayName === "Zable" && i.kind === "FINANCIAL_EVENT")).toBe(true);
+    expect(all.json.items.some((i: any) => i.displayName === "AliExpress" && i.kind === "FINANCIAL_EVENT")).toBe(true);
+    expect(all.json.items.some((i: any) => i.displayName === "Amazon" && i.kind === "FINANCIAL_EVENT")).toBe(true);
+    expect(all.json.items.filter((i: any) => i.displayName === "Tesco").length).toBe(1);
+
+    // -- Existing (pre-round-2) type/direction filters keep working alongside
+    // the new lifecycle axis. --
+    const byDirection = await api("GET", "/activity?direction=EXPENSE", { token: accessToken });
+    expect(byDirection.status).toBe(200);
+    expect(byDirection.json.items.some((i: any) => i.displayName === "Tesco")).toBe(true);
   });
 });

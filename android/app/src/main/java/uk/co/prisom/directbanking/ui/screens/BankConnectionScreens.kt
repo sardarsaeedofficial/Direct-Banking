@@ -45,7 +45,9 @@ import uk.co.prisom.directbanking.data.remote.dto.ConnectedAccountDto
 import uk.co.prisom.directbanking.ui.EmptyState
 import uk.co.prisom.directbanking.ui.LoadingBox
 import uk.co.prisom.directbanking.ui.MessageBox
+import uk.co.prisom.directbanking.ui.connectBankButtonLabel
 import uk.co.prisom.directbanking.ui.money
+import uk.co.prisom.directbanking.ui.readinessBlockingMessage
 import uk.co.prisom.directbanking.ui.vm.Async
 import uk.co.prisom.directbanking.ui.vm.BankConnectionDetailViewModel
 import uk.co.prisom.directbanking.ui.vm.BankConnectionsViewModel
@@ -108,15 +110,9 @@ fun BankConnectionsScreen(vm: BankConnectionsViewModel, onOpen: (String) -> Unit
         onPlaidExit = { vm.onLinkCancelled() },
     )
 
-    // Financial Event Intelligence (§45): Open Banking being off must read as
-    // "not configured/enabled" here, never as a broken or empty screen.
-    val readinessMessage = readiness?.let { r ->
-        when {
-            r.configured -> null
-            !r.enabled -> "Open Banking is not enabled on this server yet."
-            else -> "Open Banking is enabled but not fully configured on the server (missing: ${r.missing.joinToString(", ")})."
-        }
-    }
+    // Financial Event Intelligence round 2 (§7): exact required copy — see
+    // readinessBlockingMessage()/connectBankButtonLabel() for the strings.
+    val readinessMessage = readiness?.let { readinessBlockingMessage(it) }
 
     Column(Modifier.fillMaxSize()) {
         Text("Bank connections", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(16.dp))
@@ -144,7 +140,7 @@ fun BankConnectionsScreen(vm: BankConnectionsViewModel, onOpen: (String) -> Unit
                         enabled = !starting && readinessMessage == null,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text(if (starting) "Starting…" else "+ Connect another bank")
+                        Text(connectBankButtonLabel(isFirstConnection = s.data.isEmpty(), starting = starting))
                     }
                     Spacer(Modifier.height(6.dp))
                     Text(

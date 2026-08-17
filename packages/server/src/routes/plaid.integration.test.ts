@@ -24,6 +24,16 @@ beforeAll(async () => {
   process.env.COOKIE_SECURE ||= "false";
   process.env.OPEN_BANKING_ENABLED = "true";
   process.env.OPEN_BANKING_DATA_KEY = "0".repeat(64);
+  // requireOpenBanking() now reads getReadiness(), which reports NOT_CONFIGURED
+  // unless a provider is explicitly named (OPEN_BANKING_PROVIDER has no
+  // default — see env.ts/registry.ts). setProviderForTests() below injects the
+  // fake at the getProvider() call site, but the readiness gate is a separate
+  // config check, so it still needs a provider name + placeholder credentials
+  // to report READY. None of these values are real — see fake-plaid-provider.ts.
+  process.env.OPEN_BANKING_PROVIDER = "plaid";
+  process.env.PLAID_CLIENT_ID ||= "test-plaid-client-id";
+  process.env.PLAID_SECRET ||= "test-plaid-secret";
+  process.env.PLAID_WEBHOOK_URI ||= "https://example.test/plaid/webhook";
   try {
     prisma = (await import("../db.js")).prisma;
     await prisma.$queryRaw`SELECT 1`;

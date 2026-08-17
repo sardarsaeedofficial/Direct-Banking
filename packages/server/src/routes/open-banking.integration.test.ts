@@ -25,6 +25,16 @@ beforeAll(async () => {
   process.env.COOKIE_SECURE ||= "false";
   process.env.OPEN_BANKING_ENABLED = "true";
   process.env.OPEN_BANKING_DATA_KEY = "0".repeat(64);
+  // requireOpenBanking() now reads getReadiness(), which reports NOT_CONFIGURED
+  // unless a provider is explicitly named (OPEN_BANKING_PROVIDER has no
+  // default — see env.ts/registry.ts). setProviderForTests() below injects the
+  // fake at the getProvider() call site, but the readiness gate is a separate
+  // config check, so it still needs a provider name + placeholder credentials
+  // to report READY. None of these values are real — see fake-provider.ts.
+  process.env.OPEN_BANKING_PROVIDER = "truelayer";
+  process.env.TRUELAYER_CLIENT_ID ||= "test-truelayer-client-id";
+  process.env.TRUELAYER_CLIENT_SECRET ||= "test-truelayer-client-secret";
+  process.env.TRUELAYER_RETURN_URI ||= "https://example.test/truelayer/return";
   try {
     prisma = (await import("../db.js")).prisma;
     await prisma.$queryRaw`SELECT 1`;
