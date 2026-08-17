@@ -603,6 +603,9 @@ model BankConnection {
   updatedAt DateTime @updatedAt
 
   @@index([userId, status])
+  // Phase 6: webhook routing looks a connection up by providerItemId on every
+  // inbound bank webhook — this was previously an unindexed full-table scan.
+  @@index([providerItemId])
 }
 
 // Each way a canonical transaction was observed (Phase 3). One transaction can

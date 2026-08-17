@@ -52,6 +52,13 @@ accountsRouter.put(
     const existing = await prisma.bankAccount.findFirst({ where: { id: req.params.id, userId: req.auth!.userId } });
     if (!existing) throw new HttpError(404, "Account not found");
     const data = res.locals.body as Partial<Record<string, unknown>>;
+    // A PROVIDER-authoritative account's balance comes only from the bank feed
+    // (setProviderBalance) — a manual override here would be silently
+    // overwritten on the next sync anyway, so reject it with a clear reason
+    // rather than let a user believe they've corrected something (Phase 6 audit).
+    if (data.balanceMinor !== undefined && existing.balanceAuthority === "PROVIDER") {
+      throw new HttpError(409, "This account's balance is managed by your connected bank and can't be edited manually");
+    }
     const account = await prisma.bankAccount.update({
       where: { id: existing.id },
       data: {

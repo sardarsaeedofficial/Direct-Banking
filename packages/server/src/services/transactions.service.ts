@@ -93,6 +93,14 @@ async function matchExpectedPayment(
  *  a caller's `$transaction` (used by the atomic auto-import operation). */
 export async function createTransaction(userId: string, input: CreateTxnInput, client?: Prisma.TransactionClient) {
   const amountMinor = BigInt(input.amountMinor);
+  const db = client ?? prisma;
+  // PROVIDER-authoritative accounts get their balance exclusively from the bank feed
+  // (setProviderBalance) — no transaction write, however it was sourced (manual,
+  // notification, CSV/statement import, a future caller), may adjust it. Enforced
+  // here rather than trusted to each caller's `applyBalance` flag, so the guarantee
+  // holds structurally for every current and future creation path.
+  const primaryAccount = await db.bankAccount.findUnique({ where: { id: input.accountId }, select: { balanceAuthority: true } });
+  const primaryIsProviderAuthoritative = primaryAccount?.balanceAuthority === "PROVIDER";
   const merchantId = await linkMerchant(userId, input.merchantName ?? input.description);
   const hash = dedupeHash({
     accountId: input.accountId,
@@ -150,9 +158,10 @@ export async function createTransaction(userId: string, input: CreateTxnInput, c
     expectedPaymentId: expectedPaymentId ?? undefined,
     importBatchId: input.importBatchId ?? undefined,
     dedupeHash: hash,
-    // Newly-created transactions maintain the balance unless cancelled or the
-    // caller opted out (provider-authoritative accounts).
-    balanceApplied: (input.applyBalance ?? true) && (input.status ?? "COMPLETED") !== "CANCELLED",
+    // Newly-created transactions maintain the balance unless cancelled, the caller
+    // opted out, or the account is provider-authoritative (see above — enforced
+    // regardless of what the caller passed).
+    balanceApplied: (input.applyBalance ?? true) && !primaryIsProviderAuthoritative && (input.status ?? "COMPLETED") !== "CANCELLED",
     settledAt: input.settledAt ?? undefined,
     // ---- Phase 1 rich ledger fields ----
     transactionType: input.transactionType ?? defaultTypeFor(input.direction),
@@ -171,15 +180,19 @@ export async function createTransaction(userId: string, input: CreateTxnInput, c
   // is adjusted atomically with the transaction so the dashboard total stays
   // consistent (ledger = opening + credits − debits). CANCELLED rows don't move money.
   const status = data.status ?? "COMPLETED";
-  const applyBalance = (input.applyBalance ?? true) && status !== "CANCELLED";
+  const applyBalance = (input.applyBalance ?? true) && !primaryIsProviderAuthoritative && status !== "CANCELLED";
   const run = async (tx: Prisma.TransactionClient) => {
     const created = await tx.transaction.create({ data, include: { merchant: true, category: true, account: true } });
     if (applyBalance) {
       const delta = input.direction === "INCOME" ? amountMinor : -amountMinor;
       await tx.bankAccount.update({ where: { id: input.accountId }, data: { balanceMinor: { increment: delta } } });
-      // A transfer moves value to the counterparty account (net worth unchanged).
+      // A transfer moves value to the counterparty account (net worth unchanged) —
+      // but never onto a provider-authoritative counterpart account either.
       if (input.transferAccountId) {
-        await tx.bankAccount.update({ where: { id: input.transferAccountId }, data: { balanceMinor: { increment: -delta } } });
+        const counterpart = await tx.bankAccount.findUnique({ where: { id: input.transferAccountId }, select: { balanceAuthority: true } });
+        if (counterpart?.balanceAuthority !== "PROVIDER") {
+          await tx.bankAccount.update({ where: { id: input.transferAccountId }, data: { balanceMinor: { increment: -delta } } });
+        }
       }
     }
     return created;
@@ -221,6 +234,11 @@ export async function reverseTransactionBalance(
   const delta = txn.direction === "INCOME" ? txn.amountMinor : -txn.amountMinor;
   await tx.bankAccount.update({ where: { id: txn.accountId }, data: { balanceMinor: { increment: -delta } } });
   if (txn.transferAccountId) {
-    await tx.bankAccount.update({ where: { id: txn.transferAccountId }, data: { balanceMinor: { increment: delta } } });
+    // Symmetric with createTransaction: never reverse balance onto a
+    // provider-authoritative counterpart account.
+    const counterpart = await tx.bankAccount.findUnique({ where: { id: txn.transferAccountId }, select: { balanceAuthority: true } });
+    if (counterpart?.balanceAuthority !== "PROVIDER") {
+      await tx.bankAccount.update({ where: { id: txn.transferAccountId }, data: { balanceMinor: { increment: delta } } });
+    }
   }
 }

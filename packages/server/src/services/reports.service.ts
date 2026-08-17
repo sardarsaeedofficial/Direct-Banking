@@ -148,9 +148,14 @@ export function groupedToCsv(title: string, rows: Grouped): string {
   return `# ${title}\n${header.join(",")}\n${lines.join("\n")}\n`;
 }
 
+/** Escape a value for CSV and neutralise spreadsheet-formula injection (Phase 6
+ *  security audit): a cell beginning with = + - @ is prefixed with a leading
+ *  apostrophe so a spreadsheet application never executes it as a formula. */
 export function csvCell(value: string): string {
-  if (/[",\n]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
-  return value;
+  let s = value;
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
 }
 
 /** Export raw transactions in a date range as CSV. */

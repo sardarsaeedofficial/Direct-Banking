@@ -4,7 +4,7 @@ import { toMinor } from "@direct-banking/shared";
 import { prisma } from "../db.js";
 import { parseCsv, parseDate } from "../utils/csv.js";
 import { dedupeHash, isDuplicate } from "./duplicate-detection.service.js";
-import { createTransaction } from "./transactions.service.js";
+import { createTransaction, reverseTransactionBalance } from "./transactions.service.js";
 import { HttpError } from "../middleware/error.js";
 
 export interface PreviewRow {
@@ -133,13 +133,25 @@ export async function commitCsv(
   return { batchId: batch.id, imported, skipped };
 }
 
-/** Roll back an import batch: delete its transactions, mark it rolled back. */
+/** Roll back an import batch: reverse each transaction's balance effect (if any
+ *  was applied), delete the transactions, mark the batch rolled back. A plain
+ *  deleteMany() would silently corrupt the account balance for any row that had
+ *  balanceApplied=true — Phase 6 audit fix, mirrors the same reverse-then-delete
+ *  pattern already used by the single-transaction delete route and Review
+ *  Centre's merge. */
 export async function rollbackBatch(userId: string, batchId: string): Promise<number> {
   const batch = await prisma.importBatch.findFirst({ where: { id: batchId, userId } });
   if (!batch) throw new HttpError(404, "Import batch not found");
   if (batch.status === "ROLLED_BACK") throw new HttpError(409, "Batch already rolled back");
 
   const deleted = await prisma.$transaction(async (tx) => {
+    const rows = await tx.transaction.findMany({
+      where: { userId, importBatchId: batchId },
+      select: { id: true, accountId: true, direction: true, amountMinor: true, transferAccountId: true, balanceApplied: true },
+    });
+    for (const row of rows) {
+      await reverseTransactionBalance(tx, row); // no-op unless balanceApplied
+    }
     const del = await tx.transaction.deleteMany({ where: { userId, importBatchId: batchId } });
     await tx.importBatch.update({ where: { id: batchId }, data: { status: "ROLLED_BACK", rolledBackAt: new Date() } });
     return del.count;

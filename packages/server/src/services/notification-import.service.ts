@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { prisma } from "../db.js";
 import { toMinor } from "@direct-banking/shared";
 import { createTransaction } from "./transactions.service.js";
+import { detectAndPairInternalTransfer } from "./internal-transfer.service.js";
+import { detectDirectDebit } from "./direct-debit.service.js";
 import { HttpError } from "../middleware/error.js";
 
 export interface RawNotification {
@@ -123,6 +125,22 @@ export async function approveNotification(
     merchantName: override.parsedMerchant ?? item.parsedMerchant ?? item.title,
     categoryId: override.categoryId ?? undefined,
   });
+
+  // Same classification pipeline the mobile approve flow runs (Phase 6 audit fix):
+  // an internal transfer approved from the web UI must never be left counting as
+  // real income/spending, and a genuine Direct Debit should still be recognised.
+  const transferConfidence = await detectAndPairInternalTransfer(userId, txn.id);
+  if (transferConfidence !== "CONFIRMED" && transferConfidence !== "HIGH") {
+    await detectDirectDebit(userId, txn.id, {
+      merchant: txn.merchantName ?? txn.description,
+      text: txn.description,
+      amountMinor: Number(txn.amountMinor),
+      accountId: txn.accountId,
+      bookedAt: txn.bookedAt,
+      direction: txn.direction,
+      reference: txn.paymentReference,
+    });
+  }
 
   await prisma.notificationImport.update({ where: { id }, data: { status: "APPROVED" } });
   return txn;
