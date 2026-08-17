@@ -149,6 +149,13 @@ describe("Phase 6 — auth/session security", () => {
     expect(res.ok).toBe(false);
     expect(res.reason).toBe("expired");
   });
+
+  it("rejects an invalid/garbage refresh token (never issued at all — distinct from expired/revoked/reused)", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const res = await sessionSvc.rotateRefreshToken("not-a-real-refresh-token-" + Date.now());
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("invalid");
+  });
 });
 
 describe("Phase 6 — cross-user ownership isolation", () => {
@@ -181,6 +188,35 @@ describe("Phase 6 — cross-user ownership isolation", () => {
     expect(merge.status).toBeGreaterThanOrEqual(400);
     const pair = await api("POST", "/internal-transfers/pair", { token: attacker.accessToken, body: { transactionAId: txn.id, transactionBId: txn.id } });
     expect(pair.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it("statement preview/parse/import all reject a non-owning user, not just the plain GET", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const acc = await prisma.bankAccount.create({ data: { userId: owner.userId, bankName: "Bank", nickname: "Acct", accountType: "CURRENT", balanceMinor: 0n, currency: "GBP" } });
+    const stmt = await prisma.statementImport.create({ data: { userId: owner.userId, accountId: acc.id, filename: "s2.csv", fileType: "CSV", fileHash: `hash-${Date.now()}`, status: "PARSED" } });
+    const asAttacker = (method: string, path: string, body?: unknown) => api(method, path, { token: attacker.accessToken, body });
+    const preview = await asAttacker("GET", `/statements/${stmt.id}/preview`);
+    expect(preview.status).toBe(404);
+    const parse = await asAttacker("POST", `/statements/${stmt.id}/parse`);
+    expect(parse.status).toBe(404);
+    const doImport = await asAttacker("POST", `/statements/${stmt.id}/import`, { excludeRowIndexes: [] });
+    expect(doImport.status).toBe(404);
+    // None of the attempts changed the owner's import status.
+    const stillParsed = await prisma.statementImport.findUnique({ where: { id: stmt.id } });
+    expect(stillParsed?.status).toBe("PARSED");
+  });
+
+  it("internal-transfer unpair rejects a non-owning user's attempt on another user's transaction", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const acc = await prisma.bankAccount.create({ data: { userId: owner.userId, bankName: "Bank", nickname: "Acct", accountType: "CURRENT", balanceMinor: 0n, currency: "GBP" } });
+    const paired = await prisma.transaction.create({
+      data: { userId: owner.userId, accountId: acc.id, direction: "TRANSFER", amountMinor: 500n, currency: "GBP", bookedAt: new Date(), description: "Owner's paired transfer", internalTransferGroupId: `grp-${Date.now()}`, internalTransferConfidence: "CONFIRMED" },
+    });
+    const res = await api("POST", "/internal-transfers/unpair", { token: attacker.accessToken, body: { transactionId: paired.id } });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    // The owner's transaction is still marked as an internal transfer — the attacker couldn't unpair it.
+    const stillPaired = await prisma.transaction.findUnique({ where: { id: paired.id } });
+    expect(stillPaired?.internalTransferGroupId).not.toBeNull();
   });
 
   it("a bank connection is invisible to every other user — read, sync, reauthorize, and delete all reject cross-user access", async (ctx) => {
@@ -310,6 +346,87 @@ describe("Phase 6 — API input security", () => {
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.status).toBeLessThan(500);
     expect(JSON.stringify(res.json)).not.toMatch(/at\s+\w+\s+\(.*:\d+:\d+\)/);
+  });
+
+  it("rejects a wrong/unsupported declared file type with a clean 400", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const acc = await prisma.bankAccount.create({ data: { userId: owner.userId, bankName: "Bank", nickname: "Acct", accountType: "CURRENT", balanceMinor: 0n, currency: "GBP" } });
+    const content = Buffer.from("MZ\x90\x00this is not a statement, it's an arbitrary binary").toString("base64");
+    const res = await api("POST", "/statements", { token: owner.accessToken, body: { accountId: acc.id, filename: "payload.exe", fileType: "EXE", contentBase64: content } });
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.json)).not.toMatch(/at\s+\w+\s+\(.*:\d+:\d+\)/);
+  });
+
+  it("rejects an empty statement file with a clean 400, not a crash", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const acc = await prisma.bankAccount.create({ data: { userId: owner.userId, bankName: "Bank", nickname: "Acct", accountType: "CURRENT", balanceMinor: 0n, currency: "GBP" } });
+    const res = await api("POST", "/statements", { token: owner.accessToken, body: { accountId: acc.id, filename: "empty.csv", fileType: "CSV", contentBase64: "" } });
+    expect(res.status).toBe(400);
+  });
+
+  it("never crashes on syntactically malformed base64 — decodes leniently and fails closed as a FAILED import", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const acc = await prisma.bankAccount.create({ data: { userId: owner.userId, bankName: "Bank", nickname: "Acct", accountType: "CURRENT", balanceMinor: 0n, currency: "GBP" } });
+    // Not valid base64 alphabet at all — Buffer.from(..., "base64") decodes this
+    // leniently rather than throwing, so the real assertion is that whatever comes
+    // out the other end is handled safely, not that this specific call 400s.
+    const res = await api("POST", "/statements", { token: owner.accessToken, body: { accountId: acc.id, filename: "junk.csv", fileType: "CSV", contentBase64: "%%%not-base64-at-all!!!===" } });
+    expect([201, 400]).toContain(res.status);
+    if (res.status === 201) expect((res.json.import as { status: string }).status).toBe("FAILED");
+    expect(JSON.stringify(res.json)).not.toMatch(/at\s+\w+\s+\(.*:\d+:\d+\)/);
+  });
+
+  it("skips rows with invalid dates or invalid/zero amounts instead of inventing or crashing, imports only the valid rows", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const acc = await prisma.bankAccount.create({ data: { userId: owner.userId, bankName: "Bank", nickname: "Acct", accountType: "CURRENT", balanceMinor: 0n, currency: "GBP" } });
+    const csv = [
+      "Date,Description,Amount",
+      "10/08/2026,Valid Row One,-12.34", // valid
+      "not-a-date,Bad Date Row,-5.00", // invalid date -> skipped
+      "11/08/2026,Bad Amount Row,not-a-number", // invalid amount -> skipped
+      "12/08/2026,Zero Amount Row,0.00", // zero amount -> skipped (no confident amount)
+      "13/08/2026,Valid Row Two,42.00", // valid
+    ].join("\n");
+    const res = await api("POST", "/statements", { token: owner.accessToken, body: { accountId: acc.id, filename: "mixed.csv", fileType: "CSV", contentBase64: Buffer.from(csv).toString("base64") } });
+    expect(res.status).toBe(201);
+    const imp = res.json.import as { status: string };
+    expect(imp.status).not.toBe("FAILED");
+    // Exactly the 2 well-formed rows were recognised; the 3 malformed ones were silently skipped, not invented as zero/garbage transactions.
+    const candidates = await prisma.statementCandidate.count({ where: { statementImportId: (res.json.import as { id: string }).id } });
+    expect(candidates).toBe(2);
+  });
+
+  it("clamps activity pagination to its configured maximum instead of erroring on an oversized limit", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const res = await api("GET", "/activity?limit=999999&offset=0", { token: owner.accessToken });
+    expect(res.status).toBe(200);
+    expect(res.json.limit).toBeLessThanOrEqual(200);
+  });
+
+  it("an unexpected enum value in a filter is rejected with a clean 400, not a raw crash or an uninformative 500", async (ctx) => {
+    if (!ready) return ctx.skip();
+    // Found during this round's fuzzing: /activity used to cast raw query-string
+    // filters straight into the Prisma `where` clause, so a bad enum value fell
+    // through to Prisma's own validation error and the generic 500 handler —
+    // safe (no crash, no stack leak) but not a proper 400. Fixed by validating
+    // direction/type/source/status against explicit whitelists before Prisma
+    // ever sees them.
+    for (const qs of ["direction=NOT_A_REAL_DIRECTION", "type=NOT_A_REAL_TYPE", "source=NOT_A_REAL_SOURCE", "status=NOT_A_REAL_STATUS"]) {
+      const res = await api("GET", `/activity?${qs}`, { token: owner.accessToken });
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(res.json)).not.toMatch(/at\s+\w+\s+\(.*:\d+:\d+\)/);
+    }
+  });
+
+  it("sanitises a path-traversal-style filename instead of using it as a real path", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const acc = await prisma.bankAccount.create({ data: { userId: owner.userId, bankName: "Bank", nickname: "Acct", accountType: "CURRENT", balanceMinor: 0n, currency: "GBP" } });
+    const csv = Buffer.from("Date,Description,Amount\n01/01/2026,Test,-10.00").toString("base64");
+    const res = await api("POST", "/statements", { token: owner.accessToken, body: { accountId: acc.id, filename: "../../../../etc/passwd.csv", fileType: "CSV", contentBase64: csv } });
+    expect(res.status).toBe(201);
+    const storedFilename = (res.json.import as { filename: string }).filename;
+    expect(storedFilename).not.toContain("/");
+    expect(storedFilename).not.toContain("\\");
   });
 });
 

@@ -578,6 +578,7 @@ import/mandate/category could destroy canonical financial history.
 | **TransactionEvidence** | via `transaction.userId` (no direct `userId` column — always accessed transaction-first) | Cascades with its `Transaction`; `statementImportId` is `SetNull` on `StatementImport` deletion | Evidence for a committed transaction survives a statement-import session being deleted; dedup fingerprint is preserved so re-import safety isn't defeated (§ Statement import runbook) |
 | **BankConnection** | `userId` indexed | **Never hard-deleted** — `revokeConnection()` sets `status: REVOKED` and nulls `providerConnectionIdEncrypted`; no delete route exists | `BankAccount.bankConnectionId` is `SetNull`, deliberately not `Cascade`, precisely so a connection's lifecycle can never touch account/transaction rows |
 | **DirectDebitMandate** | `userId` indexed, unique on `(userId, accountId, normalizedCompanyName)` | Only hard-deleted via `/direct-debits/:id/merge` — and only *after* re-pointing every referencing `Transaction.directDebitMandateId` to the surviving mandate first (verified by reading the route) | Safe — no transaction ever loses its mandate link, it's relinked before the duplicate is removed |
+| **RecurringPayment** | `(userId, status)` and `nextDueDate` indexed | `DELETE /recurring/:id` is a **soft end** only — sets `status: ENDED` + `endDate`, never a hard delete; the FK into `account` has no `onDelete` (Postgres default restrictive) so an account with an active recurring payment can't be hard-deleted underneath it either | Safe by construction on two fronts: (1) "deleting" a recurring payment can never lose history — it only removes *un-matched future* `ExpectedPayment` projections (`PROJECTED`/`DUE`/`OVERDUE`), matched/settled history is untouched; (2) `category`/`merchant` FKs have no `onDelete`, which is exactly why this phase's category-delete fix (below) had to explicitly detach `RecurringPayment.categoryId` first — without that detach the DB itself would refuse the category delete |
 | **StatementImport** | `userId` + `userId,accountId` indexed, unique on `(userId, accountId, fileHash)` (idempotency key) | `DELETE /statements/:id` ownership-checked, then hard-deletes | Safe by the schema's own design: `StatementCandidate` (disposable pre-ledger staging data) cascades away; `TransactionEvidence` (evidence for already-committed transactions) is `SetNull`, never cascaded |
 | **StatementCandidate** | via `statementImportId` → `userId` also stored directly | Cascades with its `StatementImport` | Correct — these rows are staging data, never canonical, safe to lose with their parent session |
 | **ReconciliationDecision** | `userId` indexed, unique on `(userId, transactionAId, transactionBId)` (idempotency key — a "keep separate" decision can't be recorded twice for the same pair) | **No delete route exists** — append-only by design, confirmed by grep | N/A |
@@ -876,3 +877,254 @@ needs incrementing "relative to" anything. Room stayed at `v7` — Phase 6
 added no local-schema-affecting change requiring a Room migration, per the
 constraint not to change working schema without cause. Both are reported
 as-is rather than guessed forward, per the explicit instruction.
+
+## 24. Upgrade migration rehearsal — `rehearsal_upgrade2`, redone cleanly
+
+A previous session's attempt at this exact rehearsal had been interrupted
+mid-recreation, leaving `rehearsal_upgrade2` on the disposable Postgres
+instance sitting at the *full* 26-table current schema rather than the
+partial Phase-4-era state the rehearsal needs. Redone cleanly this pass,
+without touching `prisma migrate reset` and without moving or deleting any
+tracked migration directory in the working tree:
+
+**A. Clean recreate.** Connected to the `postgres` maintenance database,
+terminated any lingering backends on `rehearsal_upgrade2`
+(`pg_terminate_backend`), `DROP DATABASE IF EXISTS` +
+`CREATE DATABASE` — a genuinely empty database, not a reset-in-place.
+
+**B/C. Partial apply, temp copy only.** Rather than moving anything inside
+`prisma/migrations/` (which `git status` confirms was never touched — 10
+directories throughout), a temporary copy of `prisma/schema.prisma` plus
+only the first 8 migration directories (through
+`20260811134641_financial_insights`) was made in the session scratchpad,
+**outside the repository**. `prisma migrate deploy --schema=<temp copy>`
+against `rehearsal_upgrade2` applied exactly those 8. Confirmed via a direct
+`_prisma_migrations` query: **8 rows, all `finished_at` set**, matching the
+Phase-4-era schema.
+
+**D. Phase-4-era seed, raw SQL.** The generated Prisma Client is built
+against the full current schema and errors on columns that don't exist yet
+at this migration level (the same issue hit in the previous rehearsal with
+`TransactionEvidence.statementImportId`), so the seed used raw parameterised
+SQL via `pg` against the actual Phase-4-era column set (checked directly
+from `information_schema.columns` rather than assumed). Seeded: 1 user, 2
+bank accounts (one linked to a bank connection), a normal debit and a
+normal income transaction, an internal-transfer pair sharing one
+`internalTransferGroupId` with mutual `transferAccountId`s, a Direct Debit
+mandate plus its linked payment transaction, 2 categories, 1 budget, 1
+`TransactionEvidence` row, and 1 `BankConnection` — account balances updated
+to reflect those transactions exactly as `createTransaction()` would have
+at the time. Stable IDs and a full row-count snapshot were captured to a
+JSON file before proceeding.
+
+**E/F. Restore the remaining migrations, deploy.** The two later migration
+directories (`20260813120000_statement_import_review`,
+`20260816090000_production_readiness_indexes`) were added to the *same temp
+copy* (never to the working tree), and `prisma migrate deploy` was re-run
+against `rehearsal_upgrade2`. Both applied cleanly.
+`prisma migrate status` → **"Database schema is up to date!"**
+
+**G. Verification — every check passed:**
+
+- **10/10** migrations recorded as finished.
+- Both bank accounts survive; **balances byte-identical** to the
+  pre-migration snapshot (`acc1: 727600 → 727600`, `acc2: 1010000 →
+  1010000`) — the migration touched no data, only schema.
+- All 5 seeded transactions survive.
+- The internal-transfer pair survives with its shared group id and mutual
+  `transferAccountId` intact.
+- The Direct Debit mandate and its linked transaction survive, link intact.
+- The budget survives, still pointing at its category.
+- Both categories survive.
+- The `TransactionEvidence` row survives, still linked to its transaction.
+- The bank connection survives, and the account-to-connection link
+  (`BankAccount.bankConnectionId`) survives.
+- The five Phase 5/6 tables (`StatementImport`, `StatementCandidate`,
+  `ReconciliationDecision`, `TransactionCorrection`, `RecurringPayment`)
+  exist post-migration and are correctly **empty** — the migration adds
+  schema, never invents data.
+- Zero orphaned transactions (LEFT JOIN against `BankAccount` with no
+  match), zero orphaned evidence rows.
+
+`UPGRADE_REHEARSAL_PASSED`. The temp schema/migration copy and the seed
+script were deleted from the scratchpad after use; nothing from this
+rehearsal was ever written to the working tree or to git.
+
+## 25. Phase 6 index migration — per-index audit against real query patterns
+
+`20260816090000_production_readiness_indexes/migration.sql` adds exactly
+one index:
+
+```sql
+CREATE INDEX "BankConnection_providerItemId_idx" ON "BankConnection"("providerItemId");
+```
+
+| Table | Column(s) | Use case requiring it |
+|---|---|---|
+| `BankConnection` | `providerItemId` | Provider webhook routing — `handleProviderWebhook(item_id, ...)` in `mobile.routes.ts`'s `/bank-connections/webhook` handler looks up the connection by `providerItemId` on **every inbound Plaid webhook call**, an externally-triggered, unauthenticated-by-user path that was previously an unindexed full-table scan. |
+
+No other tables or columns are touched by this migration — it is a single
+additive `CREATE INDEX`, nothing else, so there is nothing further to
+justify or roll back.
+
+**Representative query testing at 1,000 and 10,000 disposable transactions**
+(reusing the same seeded dataset and methodology as §21) confirmed
+`EXPLAIN (ANALYZE, BUFFERS)` shows an **Index Scan / Bitmap Heap Scan** — no
+sequential scan — for every one of the query patterns this round asked to
+be re-checked against the current index set:
+
+| Query pattern | Index used | Notes |
+|---|---|---|
+| Activity date pagination (`userId, bookedAt DESC`) | `Transaction_userId_bookedAt_idx` | confirmed in §21 |
+| Account/date filtering | `Transaction_accountId_bookedAt_idx` | leading column matches filter |
+| Category/date insights | `Transaction_userId_categoryId_bookedAt_idx` | confirmed in §21 (`categoryBreakdown`) |
+| Merchant/date insights | `Transaction_userId_merchantId_bookedAt_idx` | confirmed in §21 (`topMerchants`) |
+| Review Centre lookups | `Transaction_userId_*` composite indexes (candidate transactions are always looked up by `userId` first) | `getReviewCentre` timed in §21 at 37.6ms/100.1ms |
+| Reconciliation/evidence lookups | `TransactionEvidence` has no dedicated composite index beyond its FK indexes, but the table stays small (one row per provider-sourced transaction, not per transaction) — no seq-scan risk observed at either data scale | not a hot path under load; revisit only if evidence volume grows independently of transaction volume |
+| Statement candidate lookup | N/A at these tables' current volumes — `StatementCandidate`/`StatementImport` rows stay in the tens-to-low-hundreds per user (one row per uploaded statement's parsed rows), nowhere near the 1k/10k transaction-volume regime this section is stress-testing | no index gap found |
+
+**Verdict: the migration's one index is justified by an actual, specific,
+externally-triggered query pattern (webhook routing), and no other index is
+missing or unnecessary.** Nothing in the migration was changed. Because
+nothing changed, the fresh-install rehearsal from an empty database (§7,
+re-confirmed in this session's final gate re-run below) did not need to be
+re-run a second time on its account; the existing green result stands.
+
+## 26. Backup/restore drill — re-verified this pass against the exact step list requested
+
+Confirmed first: this environment still has **no real `pg_dump`/`pg_restore`/
+`psql` binaries** — only `initdb.exe`, `pg_ctl.exe`, `postgres.exe` ship with
+the embedded Postgres 16 package used for disposable testing here (checked
+directly inside `@embedded-postgres/windows-x64/native/bin`, not assumed).
+The COPY-based equivalent (`pg` + `pg-copy-streams` over libpq, transferring
+data via `COPY ... (FORMAT binary)` — the same mechanism `pg_dump`/
+`pg_restore` use internally) remains the correct substitute here; a real
+host runs the actual `pg_dump -Fc` / `pg_restore` commands, as
+`docs/BACKUP_RESTORE.md` documents.
+
+Redone end-to-end against fresh disposable data, mapped explicitly onto the
+requested step list:
+
+1. **Populate meaningful sample data** — seeded a dedicated drill user (1
+   account, 1 category, 1 budget, 5 transactions) into `direct_banking_test`
+   on top of whatever else was already there from other test runs; final
+   pre-backup state: **25 tables, 87 total rows** across `User` (3),
+   `BankAccount` (3), `Merchant` (15), `Category` (10), `Transaction` (17),
+   `Budget` (3), `AuditLog` (36), and 18 other tables at 0 rows.
+2. **Backup** — `BACKUP_DONE {"tables":25,"totalRows":87}`.
+3. **`test -s backup`** — every one of the 25 `.copy` archive members is a
+   real, non-empty file (`ls -la backup_archive/`: sizes from 21 bytes for
+   empty tables — binary COPY's signature+header — up to 6539 bytes for
+   `Transaction`); confirmed programmatically too via `VERIFY_OK`.
+4. **`pg_restore --list` equivalent** — no real archive-format file exists
+   to list (COPY-binary per table, not a single `pg_restore`-readable
+   archive), so the equivalent here is the manifest's per-table
+   row/byte-size table of contents, enumerated above — functionally the
+   same information `pg_restore --list` would show for a `pg_dump -Fc`
+   archive.
+5. **Second, empty disposable database** — `backup_drill_restore` created
+   fresh via the maintenance database.
+6. **Restore** — schema applied first (`prisma migrate deploy`, all 10
+   migrations, confirmed **"Database schema is up to date!"**), then all 25
+   tables' data loaded via `COPY ... FROM STDIN (FORMAT binary)` with
+   `session_replication_role = replica` to defer FK/trigger ordering during
+   the bulk load, restored to `DEFAULT` immediately after.
+7. **Verify row counts and relationships** — **all 25/25 tables matched
+   exactly** (`ROW_COUNTS`, every entry `"match":true`); **zero** orphaned
+   transactions (`Transaction ⋈ BankAccount` LEFT JOIN with no match); a
+   live 3-way spot check — `Budget ⋈ Category` join returned real linked
+   names (`"Groceries"→"Groceries"`, `"Drill Budget"→"Drill Category"`,
+   etc.), zero accounts with a `NULL` balance, and **zero**
+   `Transaction.userId`/`BankAccount.userId` ownership mismatches across
+   any restored row.
+8. **`prisma migrate status`** — **"Database schema is up to date!"** on
+   the restored database, same 10-migration count as the source.
+9. **Health/integrity smoke queries** — the row-count/orphan/join checks
+   above, plus the ownership-mismatch and null-balance checks, all against
+   the *restored* database, not the source — proving the restore produced a
+   database the application could actually run against, not just a
+   byte-identical file.
+
+**Rollback-decision guidance** (documented here and in
+`docs/BACKUP_RESTORE.md`): a restore is only ever performed into a **new**
+database, never in-place over a live one — the decision to roll back a
+production deploy is "point the app at the last-known-good backup restored
+into a freshly created database, then re-point once verified," never "restore
+over the existing production database." This drill exercised exactly that
+shape (fresh DB in, verify, only then would traffic ever be re-pointed).
+**Production was never touched at any point in this drill** — every
+connection string used throughout points at `localhost:5433`, the disposable
+instance.
+
+`INTEGRITY_CHECK_PASSED` — same clean result as the original drill, now
+re-verified explicitly against this round's exact requested step sequence.
+The drill's disposable databases (`backup_drill_restore` and the drill's
+seed rows in `direct_banking_test`) were left on the local disposable
+Postgres instance for evidence continuity; the seed rows were removed after
+verification (`user.deleteMany` on the drill's tagged email, cascades
+cleanly) so they don't linger in the shared test database going into the
+final gate run.
+
+## 27. Regression test coverage added this pass, and one real fix found while writing it
+
+Beyond the migration rehearsal and index audit above, this pass added
+regression coverage the earlier round didn't have, and fixed one genuine
+(minor) gap found in the process:
+
+- **`accounts.routes.ts`'s PROVIDER-balance manual-edit guard** had no
+  dedicated test until now — it was added in round 1 but only exercised
+  incidentally. New file
+  `packages/server/src/routes/phase6-web-account-guard.test.ts` builds a
+  small, focused cookie-session HTTP harness (register via `/api/auth/register`,
+  capture the session cookie + CSRF token, use them on subsequent requests)
+  — a separate file so its two `/auth/*` calls don't compete with
+  `phase6-security.test.ts`'s already-budgeted rate-limiter allowance. Covers
+  all three required scenarios: LEDGER + owner → allowed; PROVIDER + owner →
+  `409`, balance untouched; different user → `404` (ownership check runs
+  before the balance-authority check, so an attacker can't even confirm the
+  account exists). A fourth case was added for clarity: editing a
+  PROVIDER account's *non-balance* field (nickname) is still allowed — the
+  guard is scoped to `balanceMinor` specifically, not the whole account.
+- **Auth/ownership gaps closed**: an invalid/garbage refresh token (one that
+  was never issued at all — distinct from expired, revoked, or reused)
+  correctly returns `{ ok: false, reason: "invalid" }`; cross-user attempts
+  against statement `/preview`, `/parse`, and `/import` (not just the plain
+  `GET`) all `404`; a cross-user `/internal-transfers/unpair` attempt is
+  rejected and leaves the owner's transfer pairing intact.
+- **Input/parser fuzzing extended**: wrong/unsupported declared file type
+  (`400`), empty file (`400`), syntactically invalid base64 (decodes
+  leniently per Node's `Buffer.from` rather than throwing, so the real
+  assertion is that whatever comes out is still handled safely — either a
+  clean `400` or a `FAILED` import, never a crash), a CSV with a mix of
+  valid and invalid rows (bad date / non-numeric amount / zero amount) —
+  confirmed the parser **silently skips** each invalid row rather than
+  inventing data or crashing, importing only the well-formed rows, oversized
+  pagination limits clamp to the configured maximum (`200`) rather than
+  erroring, and a path-traversal-style filename (`../../../../etc/passwd.csv`)
+  is confirmed sanitised (`/` and `\` stripped) rather than used as a real
+  path anywhere.
+- **Formula-injection coverage confirmed for both CSV exporters** — no gap
+  found. `phase5.test.ts` already covers the Phase 5/mobile exporter
+  (`export.service.ts`'s `exportTransactionsCsv`) and `phase6.test.ts`
+  already covers the legacy exporter (`reports.service.ts`'s
+  `transactionsCsv`); both assert the leading-`=`/`@` neutralisation. Nothing
+  added here — both were already tested.
+
+**Real (minor) gap found and fixed**: fuzzing an unrecognised enum value
+into `/activity`'s `direction`/`type`/`source`/`status` query-string filters
+(e.g. `?direction=NOT_A_REAL_DIRECTION`) surfaced a Prisma validation error
+that the generic error handler *did* catch safely — no crash, no stack
+trace in the response, per the invariant this whole section is checking —
+but it came back as an uninformative `500` rather than a proper `400`,
+because the route cast the raw query string straight into the Prisma filter
+without validating it first. **Fixed**: `mobile.routes.ts`'s `/activity`
+route now validates `direction`, `type`, `source`, and `status` against
+explicit whitelists before they ever reach Prisma, returning a clean `400`
+for any unrecognised value. Covered by a new test asserting all four filters
+now `400` correctly. This was a genuinely small, targeted fix — not a
+redesign — closing exactly the class of gap this section's fuzzing exists to
+find.
+
+All additions confirmed green: `phase6-security.test.ts` →
+**31/31 passed**; `phase6-web-account-guard.test.ts` → **4/4 passed**;
+server typecheck clean after the `/activity` route change.

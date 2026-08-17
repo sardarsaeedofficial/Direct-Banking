@@ -1362,6 +1362,15 @@ mobileRouter.get(
   }),
 );
 
+// Query-string enum filters accepted by /activity — validated against these
+// whitelists before ever reaching Prisma, so an unrecognised value gets a clean
+// 400 instead of falling through to Prisma's own validation error (which the
+// generic error handler still catches safely, but as an uninformative 500).
+const ACTIVITY_DIRECTIONS = ["INCOME", "EXPENSE", "TRANSFER"] as const;
+const ACTIVITY_TYPES = ["INCOME", "PURCHASE", "INTERNAL_TRANSFER", "DIRECT_DEBIT", "STANDING_ORDER", "CASH_WITHDRAWAL", "BANK_FEE", "REFUND", "TRANSFER", "OTHER"] as const;
+const ACTIVITY_SOURCES = ["MANUAL", "CSV_IMPORT", "NOTIFICATION", "OPEN_BANKING", "STATEMENT_IMPORT"] as const;
+const ACTIVITY_STATUSES = ["PENDING", "COMPLETED", "REFUNDED", "CANCELLED"] as const;
+
 // ── Activity search (server-side filters + pagination) ────────────────────────
 mobileRouter.get(
   "/activity",
@@ -1370,6 +1379,12 @@ mobileRouter.get(
     const userId = req.mobileAuth!.userId;
     const q = req.query;
     const str = (k: string) => (typeof q[k] === "string" && (q[k] as string).trim() ? (q[k] as string).trim() : undefined);
+    const enumParam = <T extends readonly string[]>(k: string, allowed: T): T[number] | undefined => {
+      const v = str(k);
+      if (v === undefined) return undefined;
+      if (!(allowed as readonly string[]).includes(v)) throw new HttpError(400, `Invalid value for ${k}`, { allowed });
+      return v as T[number];
+    };
     const limit = Math.min(Number(q.limit) || 50, 200);
     const offset = Math.max(0, Number(q.offset) || 0);
 
@@ -1389,13 +1404,19 @@ mobileRouter.get(
     if (str("accountId")) where.accountId = str("accountId");
     if (str("sender")) where.senderName = { contains: str("sender")!, mode: "insensitive" };
     if (str("recipient")) where.recipientName = { contains: str("recipient")!, mode: "insensitive" };
-    if (str("direction")) where.direction = str("direction") as never;
-    if (str("type")) where.transactionType = str("type") as never;
-    if (str("source")) where.source = str("source") as never;
+    const direction = enumParam("direction", ACTIVITY_DIRECTIONS);
+    if (direction) where.direction = direction;
+    const type = enumParam("type", ACTIVITY_TYPES);
+    if (type) where.transactionType = type;
+    const source = enumParam("source", ACTIVITY_SOURCES);
+    if (source) where.source = source;
     const settled = str("settled");
     if (settled === "pending") where.status = "PENDING";
     else if (settled === "settled") where.status = "COMPLETED";
-    else if (str("status")) where.status = str("status") as never;
+    else {
+      const status = enumParam("status", ACTIVITY_STATUSES);
+      if (status) where.status = status;
+    }
 
     const amount: Prisma.BigIntFilter = {};
     if (q.minAmount != null && !isNaN(Number(q.minAmount))) amount.gte = BigInt(Math.round(Number(q.minAmount)));
