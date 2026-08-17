@@ -363,13 +363,22 @@ class BankConnectionsViewModel(private val repo: uk.co.prisom.directbanking.data
     val state = _state.asStateFlow()
     val action = MutableStateFlow<ConnectAction?>(null)
     val starting = MutableStateFlow(false)
+    // Financial Event Intelligence: null while loading, then the safe/non-secret
+    // readiness state so the screen can say exactly why linking a bank isn't
+    // available yet ("not enabled" vs "not configured") instead of only
+    // surfacing a failure after the user taps Connect.
+    private val _readiness = MutableStateFlow<uk.co.prisom.directbanking.data.remote.dto.BankConnectionsReadiness?>(null)
+    val readiness = _readiness.asStateFlow()
 
-    init { refresh() }
+    init { refresh(); loadReadiness() }
     fun refresh() = viewModelScope.launch {
         _state.value = Async.Loading
         _state.value = runCatching { repo.list() }
             .recoverCatching { repo.cached() } // offline fallback
             .fold({ Async.Success(it) }, { Async.Failure(errorText(it)) })
+    }
+    private fun loadReadiness() = viewModelScope.launch {
+        _readiness.value = runCatching { repo.readiness() }.getOrNull()
     }
 
     /** Begin a connection; emit the provider-specific completion action. */

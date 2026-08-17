@@ -229,6 +229,18 @@ data class StartConnectionResponse(
     val linkToken: String? = null,
 )
 
+// Financial Event Intelligence: safe, non-secret Bank Connections readiness
+// state — lets the UI show a clear "disabled" / "not configured" reason
+// instead of only discovering a problem from a failed start() call.
+@Serializable
+data class BankConnectionsReadiness(
+    val enabled: Boolean,
+    val provider: String,
+    val environment: String,
+    val configured: Boolean,
+    val missing: List<String> = emptyList(),
+)
+
 @Serializable data class CompleteConnectionRequest(val publicToken: String)
 @Serializable data class OkResponse(val ok: Boolean = false)
 @Serializable data class BankConnectionListResponse(val items: List<BankConnectionDto> = emptyList())

@@ -27,6 +27,9 @@ import {
   normaliseCompany,
   recomputeMandate,
 } from "../services/direct-debit.service.js";
+import { ingestFinancialEvent } from "../services/financial-events/financial-event.service.js";
+import { findSuspiciousLegacyTransactions, applyHistoricalCorrection } from "../services/financial-events/historical-review.service.js";
+import { KNOWN_BANKS } from "../services/notification-import.service.js";
 import { getDashboard } from "../services/dashboard.service.js";
 import { registerUser } from "../services/users.service.js";
 import { teachMerchantCategory } from "../services/categorization.service.js";
@@ -52,7 +55,7 @@ import {
   revokeConnection,
   syncConnection,
 } from "../services/open-banking/bank-feed.service.js";
-import { getProvider, openBankingEnabled, returnUri } from "../services/open-banking/registry.js";
+import { getProvider, openBankingEnabled, returnUri, getReadiness } from "../services/open-banking/registry.js";
 import {
   createStatementImport,
   reconcileStatement,
@@ -517,7 +520,14 @@ mobileRouter.post(
 // ── Bank connections / Open Banking (Phase 3) ───────────────────────────────
 
 function requireOpenBanking() {
-  if (!openBankingEnabled() || !getProvider()) throw new HttpError(503, "Open Banking is not enabled");
+  // Distinguishable reasons (§41) rather than one generic 503 for every cause —
+  // "disabled" (the safe default) and "misconfigured" (enabled but missing
+  // credentials, or the wrong provider selected) are genuinely different
+  // situations and the client should tell them apart rather than show a
+  // single unexplained "not working".
+  const r = getReadiness();
+  if (!r.enabled) throw new HttpError(503, "Open Banking is not enabled", { reason: "DISABLED" });
+  if (!getProvider()) throw new HttpError(503, "Open Banking is not configured", { reason: "NOT_CONFIGURED", missing: r.missing });
 }
 
 function publicConnection(c: Record<string, any>) {
@@ -535,6 +545,17 @@ function publicConnection(c: Record<string, any>) {
     createdAt: c.createdAt?.toISOString?.() ?? null,
   };
 }
+
+// Safe, authenticated, non-secret readiness check (§40) — lets Android show a
+// clear "Open Banking is not configured" / "not enabled" state up front
+// instead of only discovering it from a failed /start call.
+mobileRouter.get(
+  "/bank-connections/readiness",
+  requireMobileAuth,
+  asyncHandler(async (_req, res) => {
+    res.json(getReadiness());
+  }),
+);
 
 mobileRouter.post(
   "/bank-connections/start",
@@ -745,6 +766,41 @@ mobileRouter.post(
 
     try {
       const out = await prisma.$transaction(async (tx) => {
+        // Financial Event Intelligence: the client's own direction/confidence is
+        // never trusted blindly. The notification's OWN wording is re-classified
+        // here (Notification -> Source Trust -> Classifier -> Lifecycle
+        // Validation -> Ledger Posting Policy) and only a sufficiently certain
+        // COMPLETED event is ever allowed to reach createTransaction() — an
+        // upcoming, pending, declined, failed, cancelled or low-confidence event
+        // is recorded as a FinancialEvent only, never posted. Source trust
+        // (a verified banking-app package) raises confidence; it never by
+        // itself promotes a lifecycle to COMPLETED (see classifier.ts).
+        const trustedSource = Object.prototype.hasOwnProperty.call(KNOWN_BANKS, c.sourcePackage);
+        const ingested = await ingestFinancialEvent(
+          userId,
+          {
+            accountId: c.accountId,
+            sourcePackage: c.sourcePackage,
+            sourceFingerprint: c.fingerprint,
+            trustedSource,
+            title: c.title,
+            redactedText: c.redactedSourceText,
+            merchantHint: c.merchant ?? null,
+            clientDirection: c.direction,
+            clientAmountMinor: c.amountMinor,
+            clientConfidence: c.confidence,
+            occurredAt: new Date(c.occurredAt),
+            categoryId: c.categoryId ?? null,
+            senderName: c.senderName ?? null,
+            senderBankName: c.senderBankName ?? null,
+            recipientName: c.recipientName ?? null,
+            recipientBankName: c.recipientBankName ?? null,
+            paymentReference: c.paymentReference ?? null,
+            paymentReason: c.paymentReason ?? null,
+          },
+          tx,
+        );
+
         const importRow = await tx.notificationImport.create({
           data: {
             userId,
@@ -760,59 +816,25 @@ mobileRouter.post(
             direction: c.direction,
             currency: c.currency,
             confidence: c.confidence,
-            reviewState: reviewStateFor(c.confidence),
+            reviewState: ingested.requiresReview ? "REVIEW_REQUIRED" : reviewStateFor(c.confidence),
             sourceHash: c.fingerprint,
-            status: NotifStatus.APPROVED,
+            // Only actually posted when the ledger posting policy allowed it —
+            // an UPCOMING/DECLINED/etc. event is recorded, not "approved".
+            status: ingested.transaction ? NotifStatus.APPROVED : NotifStatus.PENDING,
+            approvedTransactionId: ingested.transaction?.id ?? undefined,
           },
         });
-        const txn = await createTransaction(
-          userId,
-          {
-            accountId: c.accountId,
-            direction: c.direction,
-            status: "COMPLETED",
-            source: "NOTIFICATION",
-            amountMinor: c.amountMinor,
-            currency: c.currency,
-            bookedAt: new Date(c.occurredAt),
-            description: c.merchant ?? c.title,
-            merchantName: c.merchant ?? c.title,
-            categoryId: c.categoryId ?? undefined,
-            // Enrichment (all optional): populate counterparties/reference for the ledger.
-            senderName: c.senderName ?? undefined,
-            senderBankName: c.senderBankName ?? undefined,
-            recipientName: c.recipientName ?? undefined,
-            recipientBankName: c.recipientBankName ?? undefined,
-            paymentReference: c.paymentReference ?? undefined,
-            paymentReason: c.paymentReason ?? undefined,
-            sourceBankPackage: c.sourcePackage,
-          },
-          tx,
-        );
-        // Pair with the opposite side (own-account transfer) atomically within the import.
-        const transferConfidence = await detectAndPairInternalTransfer(userId, txn.id, tx);
-        // Direct Debit detection — never on an internal transfer.
-        if (transferConfidence !== "CONFIRMED" && transferConfidence !== "HIGH") {
-          await detectDirectDebit(
-            userId,
-            txn.id,
-            {
-              merchant: c.merchant ?? c.title,
-              text: c.redactedSourceText,
-              amountMinor: c.amountMinor,
-              accountId: c.accountId,
-              bookedAt: new Date(c.occurredAt),
-              direction: c.direction,
-              reference: c.paymentReference,
-            },
-            tx,
-          );
-        }
-        const finalTxn = await tx.transaction.findUnique({ where: { id: txn.id }, include: { merchant: true, category: true, account: true } });
-        const updated = await tx.notificationImport.update({ where: { id: importRow.id }, data: { approvedTransactionId: txn.id } });
-        return { import: updated, transaction: finalTxn };
+
+        let result: string;
+        if (ingested.transaction) result = "AUTO_IMPORTED";
+        else if (ingested.event.lifecycle === "UPCOMING") result = "UPCOMING_RECORDED";
+        else if (["DECLINED", "FAILED", "CANCELLED"].includes(ingested.event.lifecycle)) result = "NOT_POSTED";
+        else if (ingested.requiresReview) result = "REVIEW_REQUIRED";
+        else result = "NOT_POSTED";
+
+        return { import: importRow, transaction: ingested.transaction, event: ingested.event, result };
       });
-      res.status(201).json({ ...out, duplicate: false, result: "AUTO_IMPORTED" });
+      res.status(201).json({ ...out, duplicate: false });
     } catch (err) {
       // Concurrent duplicate (unique userId+sourceHash) → return the existing result.
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
@@ -957,6 +979,33 @@ mobileRouter.delete(
     if (!item) throw new HttpError(404, "Import not found");
     await prisma.notificationImport.delete({ where: { id: item.id } });
     res.json({ deleted: true });
+  }),
+);
+
+// Financial Event Intelligence (§27): identify historical notification-derived
+// transactions that were posted under the old "trusted source + amount =
+// completed" assumption but would NOT be classified as completed under the
+// current rules (e.g. an upcoming credit-card repayment, a future Direct
+// Debit, a declined payment). Read-only — nothing is changed by this call.
+mobileRouter.get(
+  "/notification-imports/suspicious",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const candidates = await findSuspiciousLegacyTransactions(req.mobileAuth!.userId);
+    res.json({ items: candidates });
+  }),
+);
+
+// User-confirmed correction for one suspicious candidate (never automatic).
+// Reverses the transaction's balance effect exactly once and marks it
+// CANCELLED, with a TransactionCorrection audit row recording the before/
+// after state. The original row is never deleted.
+mobileRouter.post(
+  "/notification-imports/:transactionId/apply-correction",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const result = await applyHistoricalCorrection(req.mobileAuth!.userId, req.params.transactionId);
+    res.json({ corrected: true, ...result });
   }),
 );
 

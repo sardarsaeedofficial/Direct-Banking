@@ -56,6 +56,10 @@ enum TxnType {
   BANK_FEE
   REFUND
   TRANSFER
+  // A repayment of a credit-card balance. Distinct economic type from ordinary
+  // spending: the purchases on the card were the real expense, so a repayment
+  // must never be double-counted as spending (Financial Event Intelligence).
+  CREDIT_CARD_REPAYMENT
   OTHER
 }
 
@@ -240,6 +244,7 @@ model User {
   statementImports StatementImport[]
   transactionCorrections TransactionCorrection[]
   reconciliationDecisions ReconciliationDecision[]
+  financialEvents FinancialEvent[]
 }
 
 model Session {
@@ -1005,6 +1010,10 @@ enum CorrectionAction {
   INTERNAL_TRANSFER_UNPAIR
   DUPLICATE_MERGE
   DUPLICATE_KEEP_SEPARATE
+  // A user-confirmed correction of a historically misclassified financial event
+  // (e.g. an upcoming/declined notification that was incorrectly posted as a
+  // completed transaction before this phase's lifecycle safeguards existed).
+  LIFECYCLE_RECLASSIFY
 }
 
 model TransactionCorrection {
@@ -1019,4 +1028,139 @@ model TransactionCorrection {
 
   @@index([userId, createdAt])
   @@index([transactionId])
+}
+
+// ---------- Financial Event Intelligence ----------
+// A semantic layer between raw notification/provider capture and the canonical
+// ledger. A trusted source proves WHO sent the notification; it never proves
+// money moved, the direction, or that a transaction is complete. Every
+// notification/provider signal becomes a FinancialEvent first; only a
+// sufficiently certain COMPLETED/postable event may ever create or modify a
+// canonical Transaction/balance. See LedgerPostingPolicy in
+// services/financial-events/ for the rules that enforce this.
+
+enum FinEventKind {
+  CARD_PURCHASE
+  BANK_TRANSFER
+  DIRECT_DEBIT
+  CREDIT_CARD_REPAYMENT
+  STANDING_ORDER
+  SUBSCRIPTION
+  RECURRING_CARD
+  CASH_WITHDRAWAL
+  FEE
+  REFUND
+  REVERSAL
+  BALANCE_INFORMATION
+  NON_FINANCIAL
+  UNKNOWN
+}
+
+enum FinEventLifecycle {
+  UPCOMING
+  PENDING
+  COMPLETED
+  DECLINED
+  FAILED
+  REVERSED
+  CANCELLED
+  REFUNDED
+  UNKNOWN
+}
+
+// Separate from lifecycle: whether actual money has moved yet (NONE for
+// UPCOMING/DECLINED/FAILED/CANCELLED, DEBIT/CREDIT once real).
+enum MoneyEffect {
+  NONE
+  DEBIT
+  CREDIT
+}
+
+// What the event is currently allowed to do to the ledger. Decided exclusively
+// by LedgerPostingPolicy — never by a notification parser.
+enum LedgerImpact {
+  NONE
+  POSTED
+  PENDING_VISIBLE
+  CORRECTED
+}
+
+enum PaymentRail {
+  DIRECT_DEBIT
+  CARD
+  TRANSFER
+  STANDING_ORDER
+  CASH
+  OTHER
+}
+
+enum FinEventConfidenceLevel {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+model FinancialEvent {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Soft references (no DB-level FK), consistent with Transaction's existing
+  // senderAccountId/recipientAccountId pattern: the referenced row may not
+  // exist yet (a mandate/transaction created after the event) or may be
+  // created by a later reconciliation pass. Ownership is always enforced by
+  // application-level userId scoping on every read/write, matching every
+  // other model in this schema.
+  accountId             String?
+  directDebitMandateId  String?
+  recurringPaymentId    String?
+  linkedTransactionId   String?
+  notificationImportId  String?
+
+  sourceType        String // "NOTIFICATION" | "PLAID" | "TRUELAYER" | "STATEMENT" | "MANUAL"
+  sourcePackage     String?
+  sourceFingerprint String
+
+  eventKind   FinEventKind
+  lifecycle   FinEventLifecycle
+  paymentRail PaymentRail?
+
+  amountMinor Int?
+  currency    String?
+
+  // The direction the event implies once/if money moves — known even for an
+  // UPCOMING event ("this will be a debit") while moneyEffect stays NONE.
+  expectedDirection TxnDirection?
+  moneyEffect       MoneyEffect
+  ledgerImpact      LedgerImpact
+
+  expectedAt DateTime?
+  occurredAt DateTime?
+  settledAt  DateTime?
+
+  merchantName  String?
+  senderName    String?
+  recipientName String?
+  reference     String?
+
+  confidenceScore Float // 0..1, source-trust + semantic-clarity combined
+  confidenceLevel FinEventConfidenceLevel
+  reasonCode      String? // which rule/parser produced this classification
+
+  // Rules version this event was classified with, so a future rules revision
+  // can re-evaluate specific events without reprocessing everything on startup.
+  semanticVersion Int @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Idempotency: the same device notification (same fingerprint) always
+  // resolves to the same event, never a duplicate, mirroring
+  // NotificationImport's userId+sourceHash uniqueness.
+  @@unique([userId, sourceFingerprint])
+  @@index([userId, lifecycle])
+  @@index([userId, eventKind])
+  @@index([accountId])
+  @@index([directDebitMandateId])
+  @@index([linkedTransactionId])
 }

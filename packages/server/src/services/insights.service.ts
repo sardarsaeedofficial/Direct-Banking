@@ -16,14 +16,27 @@ import {
 // transaction. We therefore AND together NULL-safe equalities (`IS NULL` on the
 // transfer link columns, non-null `direction`) and handle the nullable type with an
 // explicit OR that keeps NULL-typed rows.
+// Credit-card repayments are excluded the same way transfers are (Financial
+// Event Intelligence, §3/§31): the purchases on the card were the real
+// economic expense, so counting the repayment itself as spending would
+// double-count. It is a real, completed cash movement — just not ordinary
+// consumer spending — so it stays visible in Activity and net worth, only
+// excluded from these income/spending/budget/merchant aggregates.
+//
+// A REFUNDED original is also excluded (Financial Event Intelligence, §26): a
+// purchase that was fully reversed was never real net spending. Its offsetting
+// correction transaction (transactionType REFUND, created by reconciliation)
+// is excluded too, so a refund doesn't inflate income either — the pair
+// cancels out of these aggregates entirely rather than each half counting on
+// its own side.
 export const NON_TRANSFER_WHERE: Prisma.TransactionWhereInput = {
-  status: { not: "CANCELLED" },
+  status: { notIn: ["CANCELLED", "REFUNDED"] },
   direction: { not: "TRANSFER" },
   transferAccountId: null,
   internalTransferGroupId: null,
   OR: [
     { transactionType: null },
-    { transactionType: { notIn: ["TRANSFER", "INTERNAL_TRANSFER"] } },
+    { transactionType: { notIn: ["TRANSFER", "INTERNAL_TRANSFER", "CREDIT_CARD_REPAYMENT", "REFUND"] } },
   ],
 };
 

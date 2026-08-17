@@ -5,6 +5,7 @@ import uk.co.prisom.directbanking.data.local.db.BankConnectionDao
 import uk.co.prisom.directbanking.data.remote.ApiClients
 import uk.co.prisom.directbanking.data.remote.dto.BankConnectionDetailResponse
 import uk.co.prisom.directbanking.data.remote.dto.BankConnectionDto
+import uk.co.prisom.directbanking.data.remote.dto.BankConnectionsReadiness
 import uk.co.prisom.directbanking.data.remote.dto.CompleteConnectionRequest
 import uk.co.prisom.directbanking.data.remote.dto.StartConnectionResponse
 import uk.co.prisom.directbanking.data.remote.dto.SyncSummaryDto
@@ -14,6 +15,11 @@ class BankConnectionRepository(
     private val clients: ApiClients,
     private val dao: BankConnectionDao,
 ) {
+    /** Safe, non-secret readiness check — call before offering "Connect a bank"
+     *  so the UI can show a clear reason (disabled / not configured) instead
+     *  of only discovering a problem after start() fails. */
+    suspend fun readiness(): BankConnectionsReadiness = clients.authApi.bankConnectionsReadiness()
+
     suspend fun list(): List<BankConnectionDto> {
         val items = clients.authApi.listBankConnections().items
         val now = System.currentTimeMillis()

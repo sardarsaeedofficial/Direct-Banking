@@ -13,8 +13,14 @@ export interface RawNotification {
   receivedAt?: string;
 }
 
-// Known banking apps -> friendly bank label to help account matching.
-const KNOWN_BANKS: Record<string, string> = {
+// Known banking apps -> friendly bank label to help account matching. Exported
+// so the Financial Event classifier's source-trust check (Financial Event
+// Intelligence) shares this exact list rather than a second, drifting copy.
+// Deliberately does NOT include Halifax or Zable: neither package has been
+// confirmed from real device evidence, and guessing one risks silently
+// mis-trusting an unrelated app (§18 of the brief) — both are handled by the
+// classifier via semantic (text/title) matching instead, never package trust.
+export const KNOWN_BANKS: Record<string, string> = {
   "co.uk.monzo": "Monzo",
   "com.monzo.app": "Monzo",
   "com.starlingbank.android": "Starling",

@@ -100,12 +100,23 @@ fun BankConnectionsScreen(vm: BankConnectionsViewModel, onOpen: (String) -> Unit
     val state by vm.state.collectAsStateWithLifecycle()
     val action by vm.action.collectAsStateWithLifecycle()
     val starting by vm.starting.collectAsStateWithLifecycle()
+    val readiness by vm.readiness.collectAsStateWithLifecycle()
     HandleConnectAction(
         action,
         onConsumed = { vm.consumedAction() },
         onPlaidSuccess = { cid, pub -> vm.completePlaid(cid, pub) },
         onPlaidExit = { vm.onLinkCancelled() },
     )
+
+    // Financial Event Intelligence (§45): Open Banking being off must read as
+    // "not configured/enabled" here, never as a broken or empty screen.
+    val readinessMessage = readiness?.let { r ->
+        when {
+            r.configured -> null
+            !r.enabled -> "Open Banking is not enabled on this server yet."
+            else -> "Open Banking is enabled but not fully configured on the server (missing: ${r.missing.joinToString(", ")})."
+        }
+    }
 
     Column(Modifier.fillMaxSize()) {
         Text("Bank connections", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(16.dp))
@@ -114,14 +125,25 @@ fun BankConnectionsScreen(vm: BankConnectionsViewModel, onOpen: (String) -> Unit
             is Async.Failure -> MessageBox(s.message)
             is Async.Success -> {
                 if (s.data.isEmpty()) {
-                    EmptyState("No banks connected yet. Connect a bank to import transactions and balances directly.")
+                    EmptyState(
+                        readinessMessage
+                            ?: "No banks connected yet. Connect a bank to import transactions and balances directly.",
+                    )
                 } else {
                     LazyColumn(Modifier.weight(1f, fill = false).fillMaxWidth()) {
                         items(s.data, key = { it.id }) { ConnectionRow(it) { onOpen(it.id) } }
                     }
                 }
                 Column(Modifier.padding(16.dp)) {
-                    Button(onClick = { vm.connectAnother() }, enabled = !starting, modifier = Modifier.fillMaxWidth()) {
+                    if (readinessMessage != null) {
+                        Text(readinessMessage, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                        Spacer(Modifier.height(6.dp))
+                    }
+                    Button(
+                        onClick = { vm.connectAnother() },
+                        enabled = !starting && readinessMessage == null,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
                         Text(if (starting) "Starting…" else "+ Connect another bank")
                     }
                     Spacer(Modifier.height(6.dp))
