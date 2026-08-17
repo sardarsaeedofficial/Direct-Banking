@@ -229,6 +229,26 @@ data class StartConnectionResponse(
     val linkToken: String? = null,
 )
 
+// Financial Event Intelligence: safe, non-secret Bank Connections readiness
+// state — lets the UI show a clear "disabled" / "not configured" reason
+// instead of only discovering a problem from a failed start() call.
+// `provider`/`environment` are genuinely absent (null) whenever Open Banking
+// is disabled, or enabled but no provider has been explicitly named yet
+// (OPEN_BANKING_PROVIDER has no server-side default — see registry.ts) — never
+// guess a value here either.
+@Serializable
+data class BankConnectionsReadiness(
+    val enabled: Boolean,
+    val provider: String? = null,
+    val environment: String? = null,
+    val configured: Boolean,
+    // "DISABLED" | "NOT_CONFIGURED" | "READY" — the single field the UI keys
+    // its exact required copy off (see BankConnectionScreens.kt); defaults to
+    // the safe "disabled" reading if an older server ever omits it.
+    val reason: String = "DISABLED",
+    val missing: List<String> = emptyList(),
+)
+
 @Serializable data class CompleteConnectionRequest(val publicToken: String)
 @Serializable data class OkResponse(val ok: Boolean = false)
 @Serializable data class BankConnectionListResponse(val items: List<BankConnectionDto> = emptyList())
@@ -362,6 +382,18 @@ data class TransactionItemDto(
     val settledAt: String? = null,
     val internalTransferGroupId: String? = null,
     val internalTransferConfidence: String? = null,
+    // ---- Unified Activity item fields (Financial Event Intelligence round 2) ----
+    // Present on every /activity response row; absent (default) on the plain
+    // /transactions rows, which are always TRANSACTION/COMPLETED. See
+    // UnifiedActivityItem in mobile.routes.ts for the server-side shape.
+    val kind: String = "TRANSACTION", // "TRANSACTION" | "FINANCIAL_EVENT"
+    val displayName: String? = null,
+    val eventKind: String? = null,
+    val lifecycle: String? = null, // null on legacy /transactions rows — derive from `status` instead
+    val expectedAt: String? = null,
+    val ledgerPosted: Boolean = true,
+    val reasonCode: String? = null,
+    val paymentRail: String? = null,
 )
 
 @Serializable data class TransactionListResponse(val items: List<TransactionItemDto> = emptyList(), val count: Int = 0)

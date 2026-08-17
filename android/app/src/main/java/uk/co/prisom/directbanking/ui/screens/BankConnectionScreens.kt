@@ -45,7 +45,9 @@ import uk.co.prisom.directbanking.data.remote.dto.ConnectedAccountDto
 import uk.co.prisom.directbanking.ui.EmptyState
 import uk.co.prisom.directbanking.ui.LoadingBox
 import uk.co.prisom.directbanking.ui.MessageBox
+import uk.co.prisom.directbanking.ui.connectBankButtonLabel
 import uk.co.prisom.directbanking.ui.money
+import uk.co.prisom.directbanking.ui.readinessBlockingMessage
 import uk.co.prisom.directbanking.ui.vm.Async
 import uk.co.prisom.directbanking.ui.vm.BankConnectionDetailViewModel
 import uk.co.prisom.directbanking.ui.vm.BankConnectionsViewModel
@@ -100,12 +102,17 @@ fun BankConnectionsScreen(vm: BankConnectionsViewModel, onOpen: (String) -> Unit
     val state by vm.state.collectAsStateWithLifecycle()
     val action by vm.action.collectAsStateWithLifecycle()
     val starting by vm.starting.collectAsStateWithLifecycle()
+    val readiness by vm.readiness.collectAsStateWithLifecycle()
     HandleConnectAction(
         action,
         onConsumed = { vm.consumedAction() },
         onPlaidSuccess = { cid, pub -> vm.completePlaid(cid, pub) },
         onPlaidExit = { vm.onLinkCancelled() },
     )
+
+    // Financial Event Intelligence round 2 (§7): exact required copy — see
+    // readinessBlockingMessage()/connectBankButtonLabel() for the strings.
+    val readinessMessage = readiness?.let { readinessBlockingMessage(it) }
 
     Column(Modifier.fillMaxSize()) {
         Text("Bank connections", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(16.dp))
@@ -114,15 +121,26 @@ fun BankConnectionsScreen(vm: BankConnectionsViewModel, onOpen: (String) -> Unit
             is Async.Failure -> MessageBox(s.message)
             is Async.Success -> {
                 if (s.data.isEmpty()) {
-                    EmptyState("No banks connected yet. Connect a bank to import transactions and balances directly.")
+                    EmptyState(
+                        readinessMessage
+                            ?: "No banks connected yet. Connect a bank to import transactions and balances directly.",
+                    )
                 } else {
                     LazyColumn(Modifier.weight(1f, fill = false).fillMaxWidth()) {
                         items(s.data, key = { it.id }) { ConnectionRow(it) { onOpen(it.id) } }
                     }
                 }
                 Column(Modifier.padding(16.dp)) {
-                    Button(onClick = { vm.connectAnother() }, enabled = !starting, modifier = Modifier.fillMaxWidth()) {
-                        Text(if (starting) "Starting…" else "+ Connect another bank")
+                    if (readinessMessage != null) {
+                        Text(readinessMessage, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                        Spacer(Modifier.height(6.dp))
+                    }
+                    Button(
+                        onClick = { vm.connectAnother() },
+                        enabled = !starting && readinessMessage == null,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(connectBankButtonLabel(isFirstConnection = s.data.isEmpty(), starting = starting))
                     }
                     Spacer(Modifier.height(6.dp))
                     Text(

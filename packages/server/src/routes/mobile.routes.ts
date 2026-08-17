@@ -27,6 +27,9 @@ import {
   normaliseCompany,
   recomputeMandate,
 } from "../services/direct-debit.service.js";
+import { ingestFinancialEvent } from "../services/financial-events/financial-event.service.js";
+import { findSuspiciousLegacyTransactions, applyHistoricalCorrection } from "../services/financial-events/historical-review.service.js";
+import { KNOWN_BANKS } from "../services/notification-import.service.js";
 import { getDashboard } from "../services/dashboard.service.js";
 import { registerUser } from "../services/users.service.js";
 import { teachMerchantCategory } from "../services/categorization.service.js";
@@ -52,7 +55,7 @@ import {
   revokeConnection,
   syncConnection,
 } from "../services/open-banking/bank-feed.service.js";
-import { getProvider, openBankingEnabled, returnUri } from "../services/open-banking/registry.js";
+import { getProvider, returnUri, getReadiness } from "../services/open-banking/registry.js";
 import {
   createStatementImport,
   reconcileStatement,
@@ -517,7 +520,15 @@ mobileRouter.post(
 // ── Bank connections / Open Banking (Phase 3) ───────────────────────────────
 
 function requireOpenBanking() {
-  if (!openBankingEnabled() || !getProvider()) throw new HttpError(503, "Open Banking is not enabled");
+  // Distinguishable reasons (§41) rather than one generic 503 for every cause —
+  // "disabled" (the safe default) and "not configured" (enabled but no
+  // provider explicitly chosen, or missing credentials) are genuinely
+  // different situations and the client should tell them apart. getReadiness()
+  // is the single source of truth this and GET /bank-connections/readiness
+  // both read, so they can never drift apart.
+  const r = getReadiness();
+  if (r.reason === "DISABLED") throw new HttpError(503, "Open Banking is not enabled", { reason: r.reason });
+  if (r.reason === "NOT_CONFIGURED") throw new HttpError(503, "Open Banking is not configured", { reason: r.reason, missing: r.missing });
 }
 
 function publicConnection(c: Record<string, any>) {
@@ -535,6 +546,17 @@ function publicConnection(c: Record<string, any>) {
     createdAt: c.createdAt?.toISOString?.() ?? null,
   };
 }
+
+// Safe, authenticated, non-secret readiness check (§40) — lets Android show a
+// clear "Open Banking is not configured" / "not enabled" state up front
+// instead of only discovering it from a failed /start call.
+mobileRouter.get(
+  "/bank-connections/readiness",
+  requireMobileAuth,
+  asyncHandler(async (_req, res) => {
+    res.json(getReadiness());
+  }),
+);
 
 mobileRouter.post(
   "/bank-connections/start",
@@ -745,6 +767,41 @@ mobileRouter.post(
 
     try {
       const out = await prisma.$transaction(async (tx) => {
+        // Financial Event Intelligence: the client's own direction/confidence is
+        // never trusted blindly. The notification's OWN wording is re-classified
+        // here (Notification -> Source Trust -> Classifier -> Lifecycle
+        // Validation -> Ledger Posting Policy) and only a sufficiently certain
+        // COMPLETED event is ever allowed to reach createTransaction() — an
+        // upcoming, pending, declined, failed, cancelled or low-confidence event
+        // is recorded as a FinancialEvent only, never posted. Source trust
+        // (a verified banking-app package) raises confidence; it never by
+        // itself promotes a lifecycle to COMPLETED (see classifier.ts).
+        const trustedSource = Object.prototype.hasOwnProperty.call(KNOWN_BANKS, c.sourcePackage);
+        const ingested = await ingestFinancialEvent(
+          userId,
+          {
+            accountId: c.accountId,
+            sourcePackage: c.sourcePackage,
+            sourceFingerprint: c.fingerprint,
+            trustedSource,
+            title: c.title,
+            redactedText: c.redactedSourceText,
+            merchantHint: c.merchant ?? null,
+            clientDirection: c.direction,
+            clientAmountMinor: c.amountMinor,
+            clientConfidence: c.confidence,
+            occurredAt: new Date(c.occurredAt),
+            categoryId: c.categoryId ?? null,
+            senderName: c.senderName ?? null,
+            senderBankName: c.senderBankName ?? null,
+            recipientName: c.recipientName ?? null,
+            recipientBankName: c.recipientBankName ?? null,
+            paymentReference: c.paymentReference ?? null,
+            paymentReason: c.paymentReason ?? null,
+          },
+          tx,
+        );
+
         const importRow = await tx.notificationImport.create({
           data: {
             userId,
@@ -760,59 +817,25 @@ mobileRouter.post(
             direction: c.direction,
             currency: c.currency,
             confidence: c.confidence,
-            reviewState: reviewStateFor(c.confidence),
+            reviewState: ingested.requiresReview ? "REVIEW_REQUIRED" : reviewStateFor(c.confidence),
             sourceHash: c.fingerprint,
-            status: NotifStatus.APPROVED,
+            // Only actually posted when the ledger posting policy allowed it —
+            // an UPCOMING/DECLINED/etc. event is recorded, not "approved".
+            status: ingested.transaction ? NotifStatus.APPROVED : NotifStatus.PENDING,
+            approvedTransactionId: ingested.transaction?.id ?? undefined,
           },
         });
-        const txn = await createTransaction(
-          userId,
-          {
-            accountId: c.accountId,
-            direction: c.direction,
-            status: "COMPLETED",
-            source: "NOTIFICATION",
-            amountMinor: c.amountMinor,
-            currency: c.currency,
-            bookedAt: new Date(c.occurredAt),
-            description: c.merchant ?? c.title,
-            merchantName: c.merchant ?? c.title,
-            categoryId: c.categoryId ?? undefined,
-            // Enrichment (all optional): populate counterparties/reference for the ledger.
-            senderName: c.senderName ?? undefined,
-            senderBankName: c.senderBankName ?? undefined,
-            recipientName: c.recipientName ?? undefined,
-            recipientBankName: c.recipientBankName ?? undefined,
-            paymentReference: c.paymentReference ?? undefined,
-            paymentReason: c.paymentReason ?? undefined,
-            sourceBankPackage: c.sourcePackage,
-          },
-          tx,
-        );
-        // Pair with the opposite side (own-account transfer) atomically within the import.
-        const transferConfidence = await detectAndPairInternalTransfer(userId, txn.id, tx);
-        // Direct Debit detection — never on an internal transfer.
-        if (transferConfidence !== "CONFIRMED" && transferConfidence !== "HIGH") {
-          await detectDirectDebit(
-            userId,
-            txn.id,
-            {
-              merchant: c.merchant ?? c.title,
-              text: c.redactedSourceText,
-              amountMinor: c.amountMinor,
-              accountId: c.accountId,
-              bookedAt: new Date(c.occurredAt),
-              direction: c.direction,
-              reference: c.paymentReference,
-            },
-            tx,
-          );
-        }
-        const finalTxn = await tx.transaction.findUnique({ where: { id: txn.id }, include: { merchant: true, category: true, account: true } });
-        const updated = await tx.notificationImport.update({ where: { id: importRow.id }, data: { approvedTransactionId: txn.id } });
-        return { import: updated, transaction: finalTxn };
+
+        let result: string;
+        if (ingested.transaction) result = "AUTO_IMPORTED";
+        else if (ingested.event.lifecycle === "UPCOMING") result = "UPCOMING_RECORDED";
+        else if (["DECLINED", "FAILED", "CANCELLED"].includes(ingested.event.lifecycle)) result = "NOT_POSTED";
+        else if (ingested.requiresReview) result = "REVIEW_REQUIRED";
+        else result = "NOT_POSTED";
+
+        return { import: importRow, transaction: ingested.transaction, event: ingested.event, result };
       });
-      res.status(201).json({ ...out, duplicate: false, result: "AUTO_IMPORTED" });
+      res.status(201).json({ ...out, duplicate: false });
     } catch (err) {
       // Concurrent duplicate (unique userId+sourceHash) → return the existing result.
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
@@ -957,6 +980,33 @@ mobileRouter.delete(
     if (!item) throw new HttpError(404, "Import not found");
     await prisma.notificationImport.delete({ where: { id: item.id } });
     res.json({ deleted: true });
+  }),
+);
+
+// Financial Event Intelligence (§27): identify historical notification-derived
+// transactions that were posted under the old "trusted source + amount =
+// completed" assumption but would NOT be classified as completed under the
+// current rules (e.g. an upcoming credit-card repayment, a future Direct
+// Debit, a declined payment). Read-only — nothing is changed by this call.
+mobileRouter.get(
+  "/notification-imports/suspicious",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const candidates = await findSuspiciousLegacyTransactions(req.mobileAuth!.userId);
+    res.json({ items: candidates });
+  }),
+);
+
+// User-confirmed correction for one suspicious candidate (never automatic).
+// Reverses the transaction's balance effect exactly once and marks it
+// CANCELLED, with a TransactionCorrection audit row recording the before/
+// after state. The original row is never deleted.
+mobileRouter.post(
+  "/notification-imports/:transactionId/apply-correction",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const result = await applyHistoricalCorrection(req.mobileAuth!.userId, req.params.transactionId);
+    res.json({ corrected: true, ...result });
   }),
 );
 
@@ -1367,9 +1417,76 @@ mobileRouter.get(
 // 400 instead of falling through to Prisma's own validation error (which the
 // generic error handler still catches safely, but as an uninformative 500).
 const ACTIVITY_DIRECTIONS = ["INCOME", "EXPENSE", "TRANSFER"] as const;
-const ACTIVITY_TYPES = ["INCOME", "PURCHASE", "INTERNAL_TRANSFER", "DIRECT_DEBIT", "STANDING_ORDER", "CASH_WITHDRAWAL", "BANK_FEE", "REFUND", "TRANSFER", "OTHER"] as const;
+const ACTIVITY_TYPES = ["INCOME", "PURCHASE", "INTERNAL_TRANSFER", "DIRECT_DEBIT", "STANDING_ORDER", "CASH_WITHDRAWAL", "BANK_FEE", "REFUND", "TRANSFER", "OTHER", "CREDIT_CARD_REPAYMENT"] as const;
 const ACTIVITY_SOURCES = ["MANUAL", "CSV_IMPORT", "NOTIFICATION", "OPEN_BANKING", "STATEMENT_IMPORT"] as const;
 const ACTIVITY_STATUSES = ["PENDING", "COMPLETED", "REFUNDED", "CANCELLED"] as const;
+// Compact lifecycle selector (§3 of the Financial Event Intelligence UI
+// round) — a SEPARATE filter axis from the existing type/direction/settled
+// filters above, so Income/Spending/Internal-transfer filtering keeps
+// working exactly as before; this one additionally decides whether
+// non-posted FinancialEvents are folded into the result at all.
+const ACTIVITY_LIFECYCLE_FILTERS = ["all", "completed", "pending", "upcoming", "declined_failed"] as const;
+type ActivityLifecycleFilter = (typeof ACTIVITY_LIFECYCLE_FILTERS)[number];
+
+/** Map a canonical Transaction's own status (+ a REFUND-tagged correction
+ *  row) onto the same lifecycle vocabulary FinancialEvent uses, so the
+ *  unified Activity item always has ONE consistent `lifecycle` field
+ *  regardless of which table it came from. Transaction has no distinct
+ *  REVERSED status (see docs/PHASE6_AUDIT.md financial-integrity notes) — a
+ *  reversed transaction is represented as REFUNDED, a documented, narrow
+ *  limitation rather than a new schema value. */
+function lifecycleForTransaction(t: { status: string; transactionType: string | null }): string {
+  if (t.status === "REFUNDED") return "REFUNDED";
+  if (t.status === "CANCELLED") return "CANCELLED";
+  if (t.status === "PENDING") return "PENDING";
+  if (t.transactionType === "REFUND") return "REFUNDED"; // the correction credit itself
+  return "COMPLETED";
+}
+
+interface UnifiedActivityItem {
+  kind: "TRANSACTION" | "FINANCIAL_EVENT";
+  id: string;
+  displayName: string;
+  amountMinor: number;
+  currency: string;
+  direction: string | null;
+  eventKind: string | null;
+  lifecycle: string;
+  expectedAt: string | null;
+  occurredAt: string;
+  account: { nickname: string | null } | null;
+  category: { name: string; colour: string } | null;
+  merchant: { displayName: string } | null;
+  ledgerPosted: boolean;
+  transactionType: string | null;
+  reasonCode: string | null;
+  // The detail screen's required "Payment rail" field (§2). FinancialEvent
+  // carries this natively; Transaction has no such column, so it's derived
+  // from the closest equivalent classification below — best-effort, never
+  // guessed for a case with no reasonable mapping (falls back to null).
+  paymentRail: string | null;
+  // Every existing Transaction-shaped field the current Android client
+  // already reads is still spread onto TRANSACTION-kind items below —
+  // this interface only names the NEW unified fields.
+}
+
+/** Best-effort "payment rail" for a posted Transaction — FinancialEvent has a
+ *  real paymentRail column (set by the classifier), but Transaction predates
+ *  that concept, so this maps its existing transactionType to the closest
+ *  PaymentRail value rather than leaving the detail screen's field blank for
+ *  every ordinary completed transaction. */
+function paymentRailForTransaction(transactionType: string | null): string | null {
+  switch (transactionType) {
+    case "DIRECT_DEBIT": return "DIRECT_DEBIT";
+    case "STANDING_ORDER": return "STANDING_ORDER";
+    case "CASH_WITHDRAWAL": return "CASH";
+    case "INTERNAL_TRANSFER":
+    case "TRANSFER": return "TRANSFER";
+    case "PURCHASE":
+    case "CREDIT_CARD_REPAYMENT": return "CARD";
+    default: return null;
+  }
+}
 
 // ── Activity search (server-side filters + pagination) ────────────────────────
 mobileRouter.get(
@@ -1387,6 +1504,7 @@ mobileRouter.get(
     };
     const limit = Math.min(Number(q.limit) || 50, 200);
     const offset = Math.max(0, Number(q.offset) || 0);
+    const lifecycleFilter = (enumParam("lifecycle", ACTIVITY_LIFECYCLE_FILTERS) ?? "all") as ActivityLifecycleFilter;
 
     const where: Prisma.TransactionWhereInput = { userId, parentId: null };
     const text = str("q");
@@ -1428,22 +1546,112 @@ mobileRouter.get(
     if (str("to")) { const d = new Date(str("to")!); if (!isNaN(d.getTime())) dateFilter.lte = d; }
     if (dateFilter.gte !== undefined || dateFilter.lte !== undefined) where.bookedAt = dateFilter;
 
-    const [total, rows] = await Promise.all([
-      prisma.transaction.count({ where }),
-      prisma.transaction.findMany({
-        where,
-        include: {
-          account: { select: { nickname: true } },
-          category: { select: { name: true, colour: true } },
-          merchant: { select: { displayName: true } },
-        },
-        orderBy: { bookedAt: "desc" },
-        skip: offset,
-        take: limit,
-      }),
+    // The "completed" lifecycle filter is exactly the pre-existing behaviour
+    // (Transactions only); "upcoming"/"declined_failed" never had a
+    // Transaction at all, so they skip the Transaction query entirely.
+    // "pending" narrows Transactions to status=PENDING (a booked-but-not-
+    // settled provider transaction) alongside PENDING FinancialEvents.
+    const includeTransactions = lifecycleFilter !== "upcoming" && lifecycleFilter !== "declined_failed";
+    const txnWhere: Prisma.TransactionWhereInput = { ...where };
+    if (lifecycleFilter === "pending") txnWhere.status = "PENDING";
+
+    const includeEvents = lifecycleFilter !== "completed";
+    const eventWhere: Prisma.FinancialEventWhereInput = {
+      userId,
+      linkedTransactionId: null, // dedup rule (§4): a linked event is represented by its Transaction instead
+    };
+    if (str("accountId")) eventWhere.accountId = str("accountId");
+    if (text) eventWhere.merchantName = { contains: text, mode: "insensitive" };
+    if (dateFilter.gte !== undefined || dateFilter.lte !== undefined) eventWhere.occurredAt = dateFilter;
+    if (lifecycleFilter === "pending") eventWhere.lifecycle = "PENDING";
+    else if (lifecycleFilter === "upcoming") eventWhere.lifecycle = "UPCOMING";
+    else if (lifecycleFilter === "declined_failed") eventWhere.lifecycle = { in: ["DECLINED", "FAILED", "CANCELLED"] };
+
+    // Pure "completed" (Transactions only, the pre-existing common case for
+    // large histories) keeps true server-side DB-level pagination (skip/take)
+    // — unchanged from before this round. Once FinancialEvents are mixed in,
+    // a single DB-level skip can no longer produce a correct combined page
+    // (the two tables' rows interleave by date), so instead fetch an ordered
+    // superset from each side bounded to what this page could possibly need
+    // (offset+limit), and do the final sort/paginate once, in memory, after
+    // merging — correct at the cost of re-fetching earlier pages' rows on
+    // each request, an acceptable trade-off for the realistic depth Activity
+    // pagination is used at.
+    const txnFetch = includeEvents
+      ? { skip: 0, take: offset + limit }
+      : { skip: offset, take: limit };
+
+    const [txnTotal, txnRows, eventTotal, eventRows] = await Promise.all([
+      includeTransactions ? prisma.transaction.count({ where: txnWhere }) : Promise.resolve(0),
+      includeTransactions
+        ? prisma.transaction.findMany({
+            where: txnWhere,
+            include: {
+              account: { select: { nickname: true } },
+              category: { select: { name: true, colour: true } },
+              merchant: { select: { displayName: true } },
+            },
+            orderBy: { bookedAt: "desc" },
+            ...txnFetch,
+          })
+        : Promise.resolve([]),
+      includeEvents ? prisma.financialEvent.count({ where: eventWhere }) : Promise.resolve(0),
+      // Non-posted events are typically few (upcoming bills, pending card
+      // holds) relative to full transaction history — bounded fetch, sorted
+      // and paginated together with transactions above, rather than a
+      // separate cross-table offset (§4: "server-side filtering is
+      // preferred for larger histories" — filtering IS server-side above;
+      // only the final merge/sort happens in the route).
+      includeEvents ? prisma.financialEvent.findMany({ where: eventWhere, orderBy: { occurredAt: "desc" }, take: Math.max(offset + limit, 500) }) : Promise.resolve([]),
     ]);
-    const items = rows.map((t) => ({ ...t, amountMinor: Number(t.amountMinor) }));
-    const nextOffset = offset + rows.length < total ? offset + rows.length : null;
+
+    const accountIds = [...new Set(eventRows.map((e) => e.accountId).filter((id): id is string => !!id))];
+    const accountsById = accountIds.length
+      ? new Map((await prisma.bankAccount.findMany({ where: { id: { in: accountIds } }, select: { id: true, nickname: true } })).map((a) => [a.id, a]))
+      : new Map<string, { id: string; nickname: string }>();
+
+    const txnItems: UnifiedActivityItem[] = txnRows.map((t) => ({
+      ...t,
+      amountMinor: Number(t.amountMinor),
+      kind: "TRANSACTION",
+      displayName: t.merchant?.displayName ?? t.merchantName ?? t.description,
+      eventKind: null,
+      lifecycle: lifecycleForTransaction(t),
+      expectedAt: null,
+      occurredAt: t.bookedAt.toISOString(),
+      ledgerPosted: t.balanceApplied,
+      reasonCode: null,
+      paymentRail: paymentRailForTransaction(t.transactionType),
+    }));
+
+    const eventItems: UnifiedActivityItem[] = eventRows.map((e) => ({
+      kind: "FINANCIAL_EVENT",
+      id: e.id,
+      displayName: e.merchantName ?? e.senderName ?? e.recipientName ?? "Transaction",
+      amountMinor: e.amountMinor ?? 0,
+      currency: e.currency ?? "GBP",
+      direction: e.expectedDirection,
+      eventKind: e.eventKind,
+      lifecycle: e.lifecycle,
+      expectedAt: e.expectedAt?.toISOString() ?? null,
+      occurredAt: (e.occurredAt ?? e.createdAt).toISOString(),
+      account: e.accountId ? accountsById.get(e.accountId) ?? null : null,
+      category: null,
+      merchant: e.merchantName ? { displayName: e.merchantName } : null,
+      ledgerPosted: false,
+      transactionType: null,
+      reasonCode: e.reasonCode,
+      paymentRail: e.paymentRail,
+    }));
+
+    const merged = [...txnItems, ...eventItems].sort((a, b) => b.occurredAt.localeCompare(a.occurredAt));
+    const total = txnTotal + eventTotal;
+    // Slicing happens relative to the start of the bounded superset (index 0
+    // for the merged case, since txnFetch already started at skip:0 above),
+    // never re-subtracting offset a second time — the superset itself begins
+    // at the very first row, so [offset, offset+limit) is the correct window.
+    const items = includeEvents ? merged.slice(offset, offset + limit) : merged;
+    const nextOffset = offset + items.length < total ? offset + items.length : null;
     res.json({ items, total, limit, offset, nextOffset });
   }),
 );

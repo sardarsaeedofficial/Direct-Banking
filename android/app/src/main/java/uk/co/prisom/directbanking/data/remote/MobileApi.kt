@@ -25,6 +25,7 @@ import uk.co.prisom.directbanking.data.remote.dto.RegisterRequest
 import uk.co.prisom.directbanking.data.remote.dto.TokenResponse
 import uk.co.prisom.directbanking.data.remote.dto.BankConnectionDetailResponse
 import uk.co.prisom.directbanking.data.remote.dto.BankConnectionListResponse
+import uk.co.prisom.directbanking.data.remote.dto.BankConnectionsReadiness
 import uk.co.prisom.directbanking.data.remote.dto.CompleteConnectionRequest
 import uk.co.prisom.directbanking.data.remote.dto.OkResponse
 import uk.co.prisom.directbanking.data.remote.dto.DdUpdateRequest
@@ -91,6 +92,9 @@ interface MobileApi {
     suspend fun upcomingPayments(@Query("days") days: Int = 7): UpcomingPaymentsResponse
 
     // Bank connections / Open Banking (Phase 3)
+    @GET("api/mobile/v1/bank-connections/readiness")
+    suspend fun bankConnectionsReadiness(): BankConnectionsReadiness
+
     @POST("api/mobile/v1/bank-connections/start")
     suspend fun startBankConnection(): StartConnectionResponse
 
@@ -269,6 +273,9 @@ interface MobileApi {
         @Query("maxAmount") maxAmount: Long? = null,
         @Query("from") from: String? = null,
         @Query("to") to: String? = null,
+        // "all" | "completed" | "pending" | "upcoming" | "declined_failed" — the
+        // compact lifecycle selector (round-2 §3), a separate axis from `type`.
+        @Query("lifecycle") lifecycle: String? = null,
         @Query("limit") limit: Int = 50,
         @Query("offset") offset: Int = 0,
     ): uk.co.prisom.directbanking.data.remote.dto.ActivityResponse

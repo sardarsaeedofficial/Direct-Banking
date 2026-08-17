@@ -39,7 +39,12 @@ const schema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((v) => v === "true"),
-  OPEN_BANKING_PROVIDER: z.string().default("truelayer"),
+  // No default: a provider must be EXPLICITLY chosen once Open Banking is
+  // enabled. Silently defaulting here previously meant an operator who set
+  // OPEN_BANKING_ENABLED=true without also setting this could end up
+  // configured for a provider this app doesn't actually use natively
+  // (TrueLayer) instead of the one it does (Plaid) — see registry.ts.
+  OPEN_BANKING_PROVIDER: z.string().optional(),
   TRUELAYER_ENV: z.enum(["sandbox", "live"]).default("sandbox"),
   TRUELAYER_CLIENT_ID: z.string().optional(),
   TRUELAYER_CLIENT_SECRET: z.string().optional(),
