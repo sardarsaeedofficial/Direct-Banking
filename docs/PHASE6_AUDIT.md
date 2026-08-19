@@ -388,6 +388,13 @@ actually distributed (to a device, a store track, or testers),
 `versionCode` must be incremented for every subsequent build** —
 `docs/ANDROID_RELEASE.md` states this explicitly so it isn't missed next time.
 
+**Update (final-release-completion round):** bumped to `versionCode = 2` /
+`versionName = "1.0.1"`, per the policy above — this release candidate
+includes the Capital One notification parser (merged to `main`) plus this
+round's Plaid/Open Banking audit, account deletion, and release-hardening
+work. See `docs/ANDROID_RELEASE.md` §6 for the current signing/versioning
+verification steps.
+
 ## 11. Health/operational checks (§27)
 
 `GET /api/healthz` (`health.routes.ts`) already exists and is mounted

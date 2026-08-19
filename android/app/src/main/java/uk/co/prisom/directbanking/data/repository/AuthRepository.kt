@@ -4,6 +4,7 @@ import android.os.Build
 import uk.co.prisom.directbanking.data.local.security.TokenStore
 import uk.co.prisom.directbanking.data.remote.ApiClients
 import uk.co.prisom.directbanking.data.remote.dto.BootstrapResponse
+import uk.co.prisom.directbanking.data.remote.dto.DeleteAccountRequest
 import uk.co.prisom.directbanking.data.remote.dto.DeviceInfoDto
 import uk.co.prisom.directbanking.data.remote.dto.LoginRequest
 import uk.co.prisom.directbanking.data.remote.dto.LogoutRequest
@@ -67,5 +68,16 @@ class AuthRepository(
         } finally {
             tokenStore.clear()
         }
+    }
+
+    /**
+     * Final release completion (§3): permanently delete the account. Unlike
+     * logout(), a server failure here is NOT swallowed — the user must know
+     * their account was not actually deleted, so local credentials are only
+     * cleared once the server confirms deletion succeeded.
+     */
+    suspend fun deleteAccount(password: String): Result<Unit> = runCatching {
+        clients.authApi.deleteAccount(DeleteAccountRequest(password = password))
+        tokenStore.clear()
     }
 }

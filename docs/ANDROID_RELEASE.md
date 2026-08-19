@@ -117,7 +117,10 @@ log output, don't paste them into a chat or issue tracker.
   **unsigned** `app-release-unsigned.apk` — the build does not fail, but the
   artifact can't be installed directly or uploaded to Play until signed
   separately (e.g. via Play App Signing's upload-key flow, or by signing the
-  artifact after the fact).
+  artifact after the fact). Since the final-release-completion round, Gradle
+  also prints an explicit `logger.warn` at configure time naming exactly
+  which of the four `DIRECT_BANKING_*` variables is missing — check for it in
+  the build output if a release build seems to have "silently" gone unsigned.
 - **With valid credentials configured**: `assembleRelease` produces a
   **signed** `app-release.apk`, and `bundleRelease` produces a signed
   `app-release.aab`.
@@ -151,7 +154,10 @@ aapt dump badging app/build/outputs/apk/release/app-release.apk | grep versionCo
 
 Cross-check the reported `versionCode` against what you expect to ship — see
 `docs/PHASE6_AUDIT.md` §10 for the versioning policy (increment `versionCode`
-for every release **after** the first one that's actually distributed).
+for every release **after** the first one that's actually distributed). As of
+the final-release-completion round, `versionCode = 2` / `versionName =
+"1.0.1"` (bumped from the `1` / `"1.0.0"` baseline — Capital One parser,
+Plaid audit, account deletion and the rest of this round's changes).
 
 ## 10. `adb install -r` for upgrade testing
 

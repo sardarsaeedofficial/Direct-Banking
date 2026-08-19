@@ -158,6 +158,43 @@ See `docs/BACKUP_RESTORE.md` §4 for the full decision tree. Summary:
    the first response to "the new deploy has a bug." Restoring loses every
    transaction recorded since the backup.
 
+## Account deletion (final-release-completion round)
+
+`DELETE /api/mobile/v1/me` permanently deletes the authenticated user's
+account. This is a genuine, irreversible, user-initiated action — there is no
+operator-side "undo" short of restoring from a pre-deletion backup (see
+`docs/BACKUP_RESTORE.md`), which loses every account's activity since that
+backup, not just the deleted user's.
+
+- **Requires** the caller's current password (re-verified server-side — a
+  leaked/short-lived access token alone cannot delete the account) and the
+  exact literal request body `{"confirm":"DELETE"}`, both enforced by
+  `mobileDeleteAccountSchema` independent of whatever the Android client
+  displays.
+- **Cascades** every row the schema attributes to that user (`onDelete:
+  Cascade` on all 22 required `User` relations in `prisma/schema.prisma` —
+  see `deleteUserAccount()` in `packages/server/src/services/users.service.ts`
+  for the full audit) in one atomic `user.delete()`. The one deliberate
+  exception is `AuditLog`, whose `User` relation is `onDelete: SetNull` — audit
+  rows survive anonymised (`userId` set to `null`) rather than being deleted, a
+  pre-existing, documented retention decision.
+- **Revokes provider connections first, best-effort**: if the user has any
+  active Plaid/TrueLayer `BankConnection`, `deleteUserAccount()` calls the
+  provider's own revoke endpoint before deleting the row — once the row (and
+  its encrypted access token) is gone, Direct Banking has no way to ever
+  revoke it again, so this is the last chance. A provider failure here never
+  blocks the deletion itself.
+- **Session invalidation is automatic, not a separate step**: `MobileDevice`
+  and `MobileRefreshToken` cascade away with the user, so `requireMobileAuth`
+  (which does a live `MobileDevice` lookup on every request) rejects any
+  further request from the deleted account's access token with `401` even
+  before the token's own expiry — including a retry of the delete call
+  itself.
+- No migration was required for this feature — the cascade behaviour already
+  existed in the schema from earlier phases; this round only added the
+  route/service/tests that exercise it deliberately end-to-end (see
+  `packages/server/src/routes/account-deletion.integration.test.ts`).
+
 ## Operational checks (PM2)
 
 ```bash

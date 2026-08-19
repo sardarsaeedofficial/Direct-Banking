@@ -28,6 +28,10 @@ data class RegisterRequest(
 
 @Serializable data class RefreshRequest(val refreshToken: String)
 @Serializable data class LogoutRequest(val allDevices: Boolean = false)
+// Final release completion (§3): confirm is always the literal "DELETE" —
+// server-enforced (mobileDeleteAccountSchema), mirrors the Android UI's own
+// typed confirmation so intent is proven on both ends independently.
+@Serializable data class DeleteAccountRequest(val password: String, val confirm: String = "DELETE")
 
 @Serializable
 data class UserDto(

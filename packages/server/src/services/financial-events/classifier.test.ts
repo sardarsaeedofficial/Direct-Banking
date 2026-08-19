@@ -153,3 +153,78 @@ describe("classifyNotification — Capital One card-authorisation-hold wording",
     expect(r.lifecycle).not.toBe("PENDING");
   });
 });
+
+// Final release completion (§7): explicit regression fixtures pinned to the
+// EXACT real-world wording named in the release checklist, run at the
+// classifier unit level (no DB) so they can never be skipped by an
+// unreachable test database. financial-event-intelligence.test.ts already
+// covers the full Halifax/Zable/Capital One end-to-end flows (mandate
+// creation, ledger posting, spending exclusion) with semantically
+// equivalent but differently-worded fixtures — these pin the literal
+// phrasing given in this round so a regex too narrowly tailored to the
+// earlier wording would fail here first.
+describe("Final release completion — pinned real-world notification wording", () => {
+  it("Halifax: 'Direct Debit leaves this week. Estimated £170.00' -> UPCOMING DIRECT_DEBIT, never an immediate deduction", () => {
+    const r = classifyNotification({
+      sourcePackage: "unknown.halifax",
+      trustedSource: false,
+      occurredAt: new Date("2026-08-15T10:00:00Z"),
+      title: "Halifax",
+      text: "Direct Debit leaves this week. Estimated £170.00",
+    });
+    expect(r.lifecycle).toBe("UPCOMING");
+    expect(r.eventKind).toBe("DIRECT_DEBIT");
+    expect(r.moneyEffect).toBe("NONE");
+    expect(r.amountMinor).toBe(17000);
+  });
+
+  it("Zable: 'Your monthly repayment of £254.43 will be taken on a future date' -> UPCOMING CREDIT_CARD_REPAYMENT, never Income, never an immediate balance change", () => {
+    const r = classifyNotification({
+      sourcePackage: "unknown.zable",
+      trustedSource: false,
+      occurredAt: new Date("2026-08-15T10:00:00Z"),
+      title: "Zable",
+      text: "Your monthly repayment of £254.43 will be taken on a future date",
+    });
+    expect(r.lifecycle).toBe("UPCOMING");
+    expect(r.eventKind).toBe("CREDIT_CARD_REPAYMENT");
+    expect(r.expectedDirection).not.toBe("INCOME");
+    expect(r.moneyEffect).toBe("NONE");
+    expect(r.amountMinor).toBe(25443);
+  });
+
+  it("a normal completed card purchase classifies COMPLETED/CARD_PURCHASE/DEBIT — the ordinary, non-edge-case path", () => {
+    const r = classifyNotification({
+      sourcePackage: "com.monzo.android",
+      trustedSource: true,
+      occurredAt: new Date("2026-08-15T10:00:00Z"),
+      title: "Tesco",
+      text: "You spent £23.50 at Tesco",
+      clientDirection: "EXPENSE",
+      clientAmountMinor: 2350,
+      clientConfidence: 0.95,
+    });
+    expect(r.lifecycle).toBe("COMPLETED");
+    expect(r.eventKind).toBe("CARD_PURCHASE");
+    expect(r.expectedDirection).toBe("EXPENSE");
+    expect(r.moneyEffect).toBe("DEBIT");
+    expect(r.amountMinor).toBe(2350);
+  });
+
+  it("normal incoming income classifies COMPLETED/CREDIT, never a purchase", () => {
+    const r = classifyNotification({
+      sourcePackage: "com.monzo.android",
+      trustedSource: true,
+      occurredAt: new Date("2026-08-15T10:00:00Z"),
+      title: "Acme Payroll Ltd",
+      text: "You were paid £1,850.00 by Acme Payroll Ltd",
+      clientDirection: "INCOME",
+      clientAmountMinor: 185000,
+      clientConfidence: 0.95,
+    });
+    expect(r.lifecycle).toBe("COMPLETED");
+    expect(r.expectedDirection).toBe("INCOME");
+    expect(r.moneyEffect).toBe("CREDIT");
+    expect(r.amountMinor).toBe(185000);
+  });
+});
