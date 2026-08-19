@@ -103,6 +103,7 @@ fun BankConnectionsScreen(vm: BankConnectionsViewModel, onOpen: (String) -> Unit
     val action by vm.action.collectAsStateWithLifecycle()
     val starting by vm.starting.collectAsStateWithLifecycle()
     val readiness by vm.readiness.collectAsStateWithLifecycle()
+    val message by vm.message.collectAsStateWithLifecycle()
     HandleConnectAction(
         action,
         onConsumed = { vm.consumedAction() },
@@ -133,6 +134,13 @@ fun BankConnectionsScreen(vm: BankConnectionsViewModel, onOpen: (String) -> Unit
                 Column(Modifier.padding(16.dp)) {
                     if (readinessMessage != null) {
                         Text(readinessMessage, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                        Spacer(Modifier.height(6.dp))
+                    }
+                    // Outcome of finishing a Plaid Link journey — Link succeeding only
+                    // means the user authorized with their bank; the server-side
+                    // exchange can still fail, and the user must be told either way.
+                    message?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.height(6.dp))
                     }
                     Button(

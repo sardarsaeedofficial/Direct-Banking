@@ -302,6 +302,11 @@ class SettingsViewModel(
 ) : ViewModel() {
     private val _busy = MutableStateFlow(false)
     val busy = _busy.asStateFlow()
+    // Final release completion (§3): null = no attempt yet / dismissed,
+    // otherwise the reason deletion could not complete (never leaks the
+    // server's exact error text — see errorText()).
+    private val _deleteAccountError = MutableStateFlow<String?>(null)
+    val deleteAccountError = _deleteAccountError.asStateFlow()
 
     fun deleteLocalData() = viewModelScope.launch {
         _busy.value = true
@@ -313,6 +318,38 @@ class SettingsViewModel(
         auth.logout(allDevices = false)
         onDone()
     }
+
+    /**
+     * Permanently delete the account. The user must have already typed the
+     * "DELETE" confirmation in the UI before this is called (see
+     * DeleteAccountDialog) — the server independently re-enforces the same
+     * confirmation phrase, so intent is proven on both ends.
+     *
+     * On success: local credentials are cleared (AuthRepository.deleteAccount)
+     * and every cached Room table is wiped, so no previous account data
+     * remains visible locally even offline; onDeleted() then returns the
+     * user to login/onboarding.
+     */
+    fun deleteAccount(password: String, onDeleted: () -> Unit) = viewModelScope.launch {
+        _busy.value = true
+        _deleteAccountError.value = null
+        auth.deleteAccount(password)
+            .onSuccess {
+                withContext(Dispatchers.IO) { db.clearAllTables() }
+                _busy.value = false
+                onDeleted()
+            }
+            .onFailure {
+                _busy.value = false
+                _deleteAccountError.value = if (it is retrofit2.HttpException && it.code() == 401) {
+                    "Incorrect password"
+                } else {
+                    "Couldn't delete your account — please try again."
+                }
+            }
+    }
+
+    fun consumedDeleteAccountError() { _deleteAccountError.value = null }
 }
 
 /** Direct Debits overview tabs (spec §12). */
@@ -393,6 +430,13 @@ class BankConnectionsViewModel(private val repo: uk.co.prisom.directbanking.data
     // surfacing a failure after the user taps Connect.
     private val _readiness = MutableStateFlow<uk.co.prisom.directbanking.data.remote.dto.BankConnectionsReadiness?>(null)
     val readiness = _readiness.asStateFlow()
+    // Final release completion: surfaces the outcome of finishing a Plaid Link
+    // journey — Plaid Link itself succeeding only means the user completed
+    // authorization with their bank; the server-side public-token exchange can
+    // still fail (network, EXCHANGE_FAILED), and without this the screen
+    // silently showed nothing at all, leaving the user unsure whether their
+    // bank connected.
+    val message = MutableStateFlow<String?>(null)
 
     init { refresh(); loadReadiness() }
     fun refresh() = viewModelScope.launch {
@@ -411,17 +455,20 @@ class BankConnectionsViewModel(private val repo: uk.co.prisom.directbanking.data
         runCatching { repo.start() }.onSuccess { r ->
             action.value = if (r.mode == "link_token" && r.linkToken != null) ConnectAction.LaunchPlaid(r.connectionId, r.linkToken)
             else r.authorizationUrl?.let { ConnectAction.OpenBrowser(it) }
-        }
+        }.onFailure { message.value = "Couldn't start connecting your bank — please try again." }
         starting.value = false
     }
 
     /** Finish a Plaid Link journey by exchanging the public token, then refresh. */
     fun completePlaid(connectionId: String, publicToken: String) = viewModelScope.launch {
-        runCatching { repo.complete(connectionId, publicToken) }.onSuccess { refresh() }
+        runCatching { repo.complete(connectionId, publicToken) }
+            .onSuccess { ok -> message.value = if (ok) null else "Couldn't connect your bank — please try again."; refresh() }
+            .onFailure { message.value = "Couldn't connect your bank — please try again." }
     }
     /** The user exited Plaid Link without finishing — no connection is completed. */
     fun onLinkCancelled() { refresh() }
     fun consumedAction() { action.value = null }
+    fun consumedMessage() { message.value = null }
 }
 
 class BankConnectionDetailViewModel(
@@ -451,7 +498,9 @@ class BankConnectionDetailViewModel(
         }
     }
     fun completePlaid(publicToken: String) = viewModelScope.launch {
-        runCatching { repo.complete(connectionId, publicToken) }.onSuccess { load() }
+        runCatching { repo.complete(connectionId, publicToken) }
+            .onSuccess { ok -> message.value = if (ok) "Reconnected" else "Couldn't reconnect your bank — please try again."; load() }
+            .onFailure { message.value = "Couldn't reconnect your bank — please try again." }
     }
     fun onLinkCancelled() { message.value = "Reconnect cancelled"; load() }
     fun disconnect(onDone: () -> Unit) = viewModelScope.launch {

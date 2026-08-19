@@ -29,6 +29,26 @@ val ksKeyAlias = signingValue("DIRECT_BANKING_KEY_ALIAS", "keyAlias")
 val ksKeyPassword = signingValue("DIRECT_BANKING_KEY_PASSWORD", "keyPassword")
 val releaseSigningReady = ksStoreFile != null && ksStorePassword != null && ksKeyAlias != null && ksKeyPassword != null
 
+// Final release completion (§5): a silent unsigned release build is easy to
+// mistake for a real, signed release candidate. Say so explicitly — never the
+// credential values themselves, only which of the four variables is missing —
+// and point at exactly how to fix it (env vars for CI, keystore.properties for
+// local; see docs/ANDROID_RELEASE.md).
+if (!releaseSigningReady) {
+    val missing = listOfNotNull(
+        "DIRECT_BANKING_KEYSTORE_PATH".takeIf { ksStoreFile == null },
+        "DIRECT_BANKING_KEYSTORE_PASSWORD".takeIf { ksStorePassword == null },
+        "DIRECT_BANKING_KEY_ALIAS".takeIf { ksKeyAlias == null },
+        "DIRECT_BANKING_KEY_PASSWORD".takeIf { ksKeyPassword == null },
+    )
+    logger.warn(
+        "Direct Banking: release signing is NOT configured (missing: ${missing.joinToString(", ")}). " +
+            "assembleRelease/bundleRelease will build UNSIGNED artifacts. To sign locally, create " +
+            "keystore.properties at the repo root (storeFile/storePassword/keyAlias/keyPassword) — " +
+            "see docs/ANDROID_RELEASE.md. Never commit a keystore or its passwords.",
+    )
+}
+
 android {
     namespace = "uk.co.prisom.directbanking"
     compileSdk = 36
@@ -37,8 +57,8 @@ android {
         applicationId = "uk.co.prisom.directbanking"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.0.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

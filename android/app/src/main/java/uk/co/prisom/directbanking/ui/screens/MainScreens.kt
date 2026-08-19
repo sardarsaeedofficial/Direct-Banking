@@ -19,18 +19,25 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import uk.co.prisom.directbanking.domain.AccountSummary
@@ -199,5 +206,77 @@ fun SettingsScreen(
         OutlinedButton(onClick = { settings.revokeThisDevice { session.logout() } }, modifier = Modifier.fillMaxWidth()) {
             Text("Revoke this device")
         }
+        Spacer(Modifier.height(24.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(24.dp))
+        Text("Account", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(8.dp))
+        DeleteAccountSection(settings, session)
+    }
+}
+
+/**
+ * Final release completion (§3): a real, user-facing destructive account
+ * action — requires the user to type "DELETE" AND enter their password
+ * before the button becomes enabled, matching the server's own independent
+ * confirm+password enforcement (mobileDeleteAccountSchema).
+ */
+@Composable
+private fun DeleteAccountSection(settings: SettingsViewModel, session: SessionViewModel) {
+    var showDialog by remember { mutableStateOf(false) }
+    var confirmText by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    val busy by settings.busy.collectAsStateWithLifecycle()
+    val error by settings.deleteAccountError.collectAsStateWithLifecycle()
+
+    OutlinedButton(
+        onClick = { showDialog = true },
+        modifier = Modifier.fillMaxWidth(),
+        colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+    ) { Text("Delete account") }
+
+    if (showDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!busy) { showDialog = false; confirmText = ""; password = ""; settings.consumedDeleteAccountError() } },
+            title = { Text("Delete your account?") },
+            text = {
+                Column {
+                    Text(
+                        "This permanently deletes your account, accounts, transactions and everything else stored in Direct Banking. This cannot be undone.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Text("Type DELETE to confirm", style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.height(4.dp))
+                    OutlinedTextField(value = confirmText, onValueChange = { confirmText = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(12.dp))
+                    Text("Enter your password", style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = password, onValueChange = { password = it }, singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (error != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(error!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        settings.deleteAccount(password) {
+                            showDialog = false
+                            session.signOutAfterAccountDeletion()
+                        }
+                    },
+                    enabled = confirmText == "DELETE" && password.isNotBlank() && !busy,
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                ) { Text(if (busy) "Deleting…" else "Delete account") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDialog = false; confirmText = ""; password = ""; settings.consumedDeleteAccountError() }, enabled = !busy) { Text("Cancel") }
+            },
+        )
     }
 }

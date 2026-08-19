@@ -1,7 +1,10 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../db.js";
-import { hashPassword } from "../auth/password.js";
+import { hashPassword, verifyPassword } from "../auth/password.js";
 import { HttpError } from "../middleware/error.js";
+import { getProvider } from "./open-banking/registry.js";
+import { decryptJson } from "./open-banking/crypto.js";
+import type { ProviderConnectionSecret } from "./open-banking/provider.js";
 
 export interface SeedCategory {
   code: string;
@@ -120,4 +123,61 @@ export async function registerUser(input: { email: string; password: string; dis
     await seedDefaultCategories(user.id, tx);
     return user;
   });
+}
+
+export class DeleteAccountError extends Error {
+  constructor(public readonly code: "INVALID_PASSWORD" | "NOT_FOUND") {
+    super(code);
+    this.name = "DeleteAccountError";
+  }
+}
+
+/**
+ * Permanently deletes a user's account and every row it owns (Final release
+ * completion §3). Two-factor safety: the caller must re-prove their password
+ * (a leaked/short-lived access token alone is not enough to destroy an
+ * account) — the typed "DELETE" confirmation phrase is enforced by
+ * mobileDeleteAccountSchema before this is ever called.
+ *
+ * Deletion strategy: every user-owned model in prisma/schema.prisma declares
+ * `onDelete: Cascade` on its User relation (verified — 22 of 22 required
+ * relations), so a single `user.delete()` removes the account, its bank
+ * accounts, transactions, financial events, notification imports, statement
+ * imports, Direct Debit mandates, budgets, categories/rules, corrections,
+ * review decisions, mobile devices/sessions/refresh tokens and everything
+ * else in one atomic statement. The one deliberate exception is AuditLog,
+ * whose User relation is `onDelete: SetNull` — audit rows survive
+ * anonymised (userId → null) rather than being destroyed, an existing,
+ * documented safe-retention strategy already in the schema, not something
+ * this function invents.
+ *
+ * Provider cleanup happens first, best-effort: once the user row is gone the
+ * encrypted access tokens are gone with it, so this is the last chance to
+ * tell Plaid/TrueLayer to actually revoke the connection rather than leaving
+ * an orphaned Item live on the provider's side. A provider failure here
+ * never blocks account deletion — the user's right to delete their own data
+ * does not depend on a third-party API being reachable.
+ */
+export async function deleteUserAccount(userId: string, password: string): Promise<void> {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, passwordHash: true } });
+  if (!user) throw new DeleteAccountError("NOT_FOUND");
+  if (!(await verifyPassword(password, user.passwordHash))) throw new DeleteAccountError("INVALID_PASSWORD");
+
+  const provider = getProvider();
+  if (provider) {
+    const connections = await prisma.bankConnection.findMany({
+      where: { userId, status: { not: "REVOKED" }, providerConnectionIdEncrypted: { not: null } },
+      select: { id: true, providerConnectionIdEncrypted: true },
+    });
+    for (const conn of connections) {
+      try {
+        const secret = decryptJson<ProviderConnectionSecret>(conn.providerConnectionIdEncrypted!);
+        await provider.revokeConnection(secret);
+      } catch {
+        // Best-effort — the row (and its ciphertext) is deleted regardless.
+      }
+    }
+  }
+
+  await prisma.user.delete({ where: { id: userId } });
 }

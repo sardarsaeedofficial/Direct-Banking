@@ -149,6 +149,37 @@ None of the above requires real banking credentials — Plaid Sandbox is
 entirely synthetic. **Do not** point `PLAID_ENV` at `production` or use a
 production `PLAID_SECRET` while following this runbook.
 
+## Account deletion interaction
+
+`DELETE /api/mobile/v1/me` (final-release-completion round — see
+`docs/PRODUCTION_DEPLOYMENT.md`) revokes every one of the deleting user's
+active `BankConnection`s at the provider (Plaid `/item/remove` / TrueLayer's
+equivalent) **before** the user row — and with it, the encrypted access
+token — is deleted. This is the last point at which Direct Banking can ever
+ask the provider to revoke that connection; a provider failure at this step
+is logged as best-effort and never blocks the deletion itself.
+
+## Final release completion audit (this round)
+
+Audited end-to-end: link-token creation, `public_token` exchange, encrypted
+credential storage, `/accounts/get`, `/accounts/balance/get`,
+`/transactions/sync` (cursor persistence, added/modified/removed), webhook
+handling (signature verification), the `BankDataProvider` abstraction, the
+Bank Connections UI (Android — real Plaid Link SDK, never a stub), and the
+readiness endpoint's `DISABLED`/`NOT_CONFIGURED`/`READY` semantics. No
+TODO/stub/fake-result/hardcoded-Sandbox-only code paths were found in any of
+the production provider/service/route code (only the deliberate,
+clearly-named `FakePlaidProvider`/`FakeProvider` test doubles, which are
+never reachable outside `NODE_ENV=test`). One real gap was found and fixed:
+`BankConnectionsViewModel.completePlaid()`/`BankConnectionDetailViewModel
+.completePlaid()` on Android had no failure path — a Plaid Link session
+completing successfully (the user authorized with their bank) but the
+server-side `public_token` exchange then failing left the screen showing
+nothing at all, with no way for the user to tell whether their bank actually
+connected. Both view models now surface a clear message on that failure path
+(see `BankConnectionsLinkFlowViewModelTest.kt`); the underlying reconciliation
+logic itself required no changes.
+
 ## Production approval requirements (not covered by this document)
 
 Moving from Sandbox to Plaid Production requires, at minimum: Plaid's

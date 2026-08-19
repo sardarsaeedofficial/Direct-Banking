@@ -5,6 +5,7 @@ import {
   mobileRegisterSchema,
   mobileRefreshSchema,
   mobileLogoutSchema,
+  mobileDeleteAccountSchema,
   notifImportCreateSchema,
   notifAutoImportSchema,
   notifImportPatchSchema,
@@ -31,7 +32,7 @@ import { ingestFinancialEvent } from "../services/financial-events/financial-eve
 import { findSuspiciousLegacyTransactions, applyHistoricalCorrection } from "../services/financial-events/historical-review.service.js";
 import { KNOWN_BANKS } from "../services/notification-import.service.js";
 import { getDashboard } from "../services/dashboard.service.js";
-import { registerUser } from "../services/users.service.js";
+import { registerUser, deleteUserAccount, DeleteAccountError } from "../services/users.service.js";
 import { teachMerchantCategory } from "../services/categorization.service.js";
 import {
   monthlySummary, periodComparison, categoryBreakdown, topMerchants, netWorth,
@@ -164,6 +165,33 @@ mobileRouter.get(
     });
     if (!user) throw new HttpError(404, "User not found");
     res.json({ user: publicUser(user) });
+  }),
+);
+
+// Final release completion (§3): permanent, user-initiated account deletion.
+// Requires the current password (a leaked/short-lived access token alone
+// cannot destroy the account) and a typed "DELETE" confirmation. Deletion
+// cascades every user-owned row (see deleteUserAccount for the schema
+// audit); the response is returned before the now-deleted device's own
+// session can be used again — any subsequent request, including a retry
+// of this one, fails 401 "Device session revoked" because MobileDevice
+// cascades away with the user.
+mobileRouter.delete(
+  "/me",
+  requireMobileAuth,
+  validate(mobileDeleteAccountSchema),
+  asyncHandler(async (req, res) => {
+    const { password } = validated<typeof mobileDeleteAccountSchema>(res);
+    try {
+      await deleteUserAccount(req.mobileAuth!.userId, password);
+    } catch (err) {
+      if (err instanceof DeleteAccountError) {
+        if (err.code === "INVALID_PASSWORD") throw new HttpError(401, "Password is incorrect");
+        throw new HttpError(404, "User not found");
+      }
+      throw err;
+    }
+    res.json({ ok: true });
   }),
 );
 

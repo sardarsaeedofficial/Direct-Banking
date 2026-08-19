@@ -3,11 +3,13 @@ package uk.co.prisom.directbanking.data.remote
 import retrofit2.http.Body
 import retrofit2.http.DELETE
 import retrofit2.http.GET
+import retrofit2.http.HTTP
 import retrofit2.http.PATCH
 import retrofit2.http.POST
 import retrofit2.http.Path
 import retrofit2.http.Query
 import uk.co.prisom.directbanking.data.remote.dto.BootstrapResponse
+import uk.co.prisom.directbanking.data.remote.dto.DeleteAccountRequest
 import uk.co.prisom.directbanking.data.remote.dto.DeletedResponse
 import uk.co.prisom.directbanking.data.remote.dto.LoginRequest
 import uk.co.prisom.directbanking.data.remote.dto.LoginResponse
@@ -58,6 +60,11 @@ interface MobileApi {
 
     @GET("api/mobile/v1/me")
     suspend fun me(): MeResponse
+
+    // @DELETE does not declare a body in Retrofit; @HTTP(hasBody = true) is the
+    // explicit, unambiguous way to send one on a DELETE request.
+    @HTTP(method = "DELETE", path = "api/mobile/v1/me", hasBody = true)
+    suspend fun deleteAccount(@Body body: DeleteAccountRequest): OkResponse
 
     @GET("api/mobile/v1/bootstrap")
     suspend fun bootstrap(): BootstrapResponse

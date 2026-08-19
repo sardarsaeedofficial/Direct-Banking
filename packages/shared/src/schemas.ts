@@ -257,6 +257,18 @@ export const mobileLogoutSchema = z.object({
   allDevices: z.boolean().default(false),
 });
 
+// Final release completion (§3): account deletion is a real, user-facing,
+// irreversible action — requires both the current password (proves the
+// caller is genuinely the account holder, not just a leaked/short-lived
+// access token) and a typed confirmation phrase (proves intent, mirroring
+// the Android "type DELETE" confirmation), matching the existing
+// current-password re-verification pattern used for password change.
+export const mobileDeleteAccountSchema = z.object({
+  password: z.string().min(1).max(200),
+  confirm: z.literal("DELETE"),
+});
+export type MobileDeleteAccountInput = z.infer<typeof mobileDeleteAccountSchema>;
+
 // A parsed transaction candidate captured from a device notification.
 export const notifImportCreateSchema = z.object({
   fingerprint: z.string().min(8).max(200), // stable duplicate fingerprint (stored as sourceHash)
