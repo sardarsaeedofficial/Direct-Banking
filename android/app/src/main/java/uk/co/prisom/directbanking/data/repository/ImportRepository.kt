@@ -28,7 +28,14 @@ import uk.co.prisom.directbanking.parsing.TransactionClassifier
 import java.time.Instant
 
 /** Result states for one processed notification. */
-enum class ImportOutcome { AUTO_IMPORTED, REVIEW_REQUIRED, SETUP_REQUIRED, DUPLICATE, REJECTED, SYNC_FAILED }
+enum class ImportOutcome {
+    AUTO_IMPORTED, REVIEW_REQUIRED, SETUP_REQUIRED, DUPLICATE, REJECTED, SYNC_FAILED,
+    /** Recognised correctly (amount/merchant/card hint) but no account could be
+     *  resolved — distinct from SETUP_REQUIRED (which has no candidate data at
+     *  all) so the UI can show the real parsed details instead of a blank/zero
+     *  placeholder. See AutoImportResult.AccountMappingRequired. */
+    ACCOUNT_MAPPING_REQUIRED,
+}
 
 /** Rich outcome carrying everything diagnostics needs. */
 data class CaptureOutcome(
@@ -50,12 +57,28 @@ data class CaptureOutcome(
     val signatureChecked: Boolean = false,
     val signatureMatched: Boolean? = null,
     val signingSha256Abbrev: String? = null,
+    // ---- Diagnostics-only (never affects parsing/classification behaviour) ----
+    /** Which parser matched this source ("CapitalOneParser", "MonzoParser",
+     *  "Generic", …) — added so an unrecognised-bank capture can be diagnosed
+     *  without needing to expose the full notification body. */
+    val parserSelected: String? = null,
+    /** How many distinct currency-signalled amounts the notification text
+     *  contained (a multi-amount notification like "£4.88 … £202.51 available
+     *  to spend" is exactly the shape that used to silently fail). */
+    val amountCandidateCount: Int? = null,
 )
 
 /** Result of the injected atomic auto-import call. */
 sealed interface AutoImportResult {
     data class Imported(val transactionId: String, val remoteId: String) : AutoImportResult
     data class Duplicate(val transactionId: String?) : AutoImportResult
+    /** The notification was recognised (correct amount/merchant/card hint) but
+     *  no account could be resolved — zero or more than one of the user's own
+     *  accounts matched the card/account hint. Never silently attached to an
+     *  unrelated already-configured account. [remoteId] is the server-side
+     *  NotificationImport id, already reviewable/approvable via the existing
+     *  approve flow once the user picks or creates the right account. */
+    data class AccountMappingRequired(val remoteId: String) : AutoImportResult
     data object Failed : AutoImportResult
 }
 
@@ -96,6 +119,13 @@ class ImportRepository(
         val src = ensureSource(existing, raw.packageName, appLabel, trust)
         val sourceName = src.label
 
+        // Diagnostics only (never used to change parsing/classification) — which
+        // parser would handle this source, and how many distinct currency
+        // amounts its text carries, so a future unrecognised-bank capture is
+        // diagnosable without needing to expose the full notification body.
+        val parserSelected = parser.selectedParserName(raw.packageName)
+        val amountCandidateCount = uk.co.prisom.directbanking.parsing.Money.countAmounts(combined)
+
         // Stamps the trust classification onto any outcome produced past this point.
         fun CaptureOutcome.tagged() = copy(
             trustLevel = trust.level.name,
@@ -103,6 +133,8 @@ class ImportRepository(
             signatureChecked = trust.signatureChecked,
             signatureMatched = trust.signatureMatched,
             signingSha256Abbrev = trust.signingSha256Abbrev,
+            parserSelected = parserSelected,
+            amountCandidateCount = amountCandidateCount,
         )
 
         if (!src.approved) {
@@ -142,8 +174,40 @@ class ImportRepository(
             confidence = candidate.confidence, fingerprint = fingerprint,
         ).tagged()
 
-        // Trusted/auto source with no mapped account → SETUP_REQUIRED, remember for reprocessing.
+        // Trusted/auto source with no per-source default account mapped.
         if (accountId == null && (src.isBuiltInTrusted || src.autoImportEnabled)) {
+            // A card/account hint ("card ending 7813") gives the server enough
+            // signal to resolve the right account itself — exactly one of the
+            // user's own accounts matching the hint — or to record a properly
+            // reviewable item with the already-correct merchant/amount/hint
+            // (never a blank/zero placeholder). Only attempted when a hint
+            // actually exists; sources with no hint keep the pre-existing,
+            // purely-local SETUP_REQUIRED behaviour untouched below.
+            if (candidate.accountHint != null) {
+                importDao.upsert(entityOf(fingerprint, candidate, raw, "AUTO_PENDING", sourceName))
+                val req = autoRequest(fingerprint, candidate, raw, accountId = null, sourceName)
+                when (val r = autoImport(req)) {
+                    is AutoImportResult.Imported -> {
+                        importDao.setStatus(fingerprint, "AUTO_IMPORTED", r.remoteId)
+                        capturedDao.deleteForSource(raw.packageName)
+                        return base.copy(outcome = ImportOutcome.AUTO_IMPORTED, reason = "auto-imported (account resolved by card/account hint)", transactionId = r.transactionId)
+                    }
+                    is AutoImportResult.Duplicate -> {
+                        importDao.setStatus(fingerprint, "AUTO_IMPORTED", null)
+                        return base.copy(outcome = ImportOutcome.DUPLICATE, reason = "duplicate", transactionId = r.transactionId)
+                    }
+                    is AutoImportResult.AccountMappingRequired -> {
+                        importDao.upsert(entityOf(fingerprint, candidate, raw, "LOCAL", sourceName).copy(reviewState = "ACCOUNT_MAPPING_REQUIRED", remoteId = r.remoteId))
+                        return base.copy(outcome = ImportOutcome.ACCOUNT_MAPPING_REQUIRED, reason = "select which account this belongs to")
+                    }
+                    AutoImportResult.Failed -> {
+                        // Network/server issue — never lose the notification; fall
+                        // back to the existing local-only remember-and-reprocess path.
+                        rememberLatest(raw, combined)
+                        return base.copy(outcome = ImportOutcome.SETUP_REQUIRED, reason = "account not mapped")
+                    }
+                }
+            }
             rememberLatest(raw, combined)
             return base.copy(outcome = ImportOutcome.SETUP_REQUIRED, reason = "account not mapped")
         }
@@ -163,6 +227,13 @@ class ImportRepository(
                 is AutoImportResult.Duplicate -> {
                     importDao.setStatus(fingerprint, "AUTO_IMPORTED", null)
                     base.copy(outcome = ImportOutcome.DUPLICATE, reason = "duplicate", transactionId = r.transactionId)
+                }
+                is AutoImportResult.AccountMappingRequired -> {
+                    // Unreachable in practice: this call always sends an explicit
+                    // accountId (accountId!! above), so the server never has to
+                    // resolve one — kept only for sealed-interface exhaustiveness.
+                    importDao.upsert(entityOf(fingerprint, candidate, raw, "LOCAL", sourceName).copy(reviewState = "ACCOUNT_MAPPING_REQUIRED", remoteId = r.remoteId))
+                    base.copy(outcome = ImportOutcome.ACCOUNT_MAPPING_REQUIRED, reason = "select which account this belongs to")
                 }
                 AutoImportResult.Failed -> {
                     enqueueAuto(fingerprint, candidate, raw, accountId, sourceName)
@@ -284,7 +355,7 @@ class ImportRepository(
             paymentReference = c.paymentReference, paymentReason = c.paymentReason,
         )
 
-    private fun autoRequest(fingerprint: String, c: uk.co.prisom.directbanking.parsing.ParsedTransactionCandidate, raw: RawNotification, accountId: String, sourceName: String) =
+    private fun autoRequest(fingerprint: String, c: uk.co.prisom.directbanking.parsing.ParsedTransactionCandidate, raw: RawNotification, accountId: String?, sourceName: String) =
         NotifAutoImportRequest(
             fingerprint = fingerprint, sourcePackage = c.sourcePackage, direction = c.direction.name,
             amountMinor = c.amountMinor, currency = c.currency, merchant = c.merchant, accountHint = c.accountHint,

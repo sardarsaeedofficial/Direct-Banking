@@ -53,8 +53,11 @@ class AppContainer(context: Context) {
         autoImport = { req ->
             try {
                 val res = apiClients.authApi.autoImport(req)
-                if (res.result == "DUPLICATE") AutoImportResult.Duplicate(res.transaction?.id)
-                else AutoImportResult.Imported(res.transaction?.id ?: "", res.import.id)
+                when (res.result) {
+                    "DUPLICATE" -> AutoImportResult.Duplicate(res.transaction?.id)
+                    "ACCOUNT_MAPPING_REQUIRED" -> AutoImportResult.AccountMappingRequired(res.import.id)
+                    else -> AutoImportResult.Imported(res.transaction?.id ?: "", res.import.id)
+                }
             } catch (_: Throwable) {
                 AutoImportResult.Failed
             }

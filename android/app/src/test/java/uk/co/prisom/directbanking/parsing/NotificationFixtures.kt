@@ -69,5 +69,19 @@ object NotificationFixtures {
 
         // --- Low confidence ---
         Fixture("amount only no direction", n("com.example.bank", text = "£10.00"), false),
+
+        // --- Capital One card-authorisation wording (round-2 §1-4) — the
+        // transaction amount must be picked, never the "available to spend"
+        // balance figure that follows it in the same notification. ---
+        Fixture(
+            "capital one card auth hold",
+            n("com.ie.capitalone.uk", title = "ALIEXPRESS.COM", text = "£4.88 on card ending 7813. That leaves £202.51 available to spend"),
+            true, TransactionDirection.EXPENSE, 488, merchantContains = "ALIEXPRESS", minConfidence = 0.9,
+        ),
+        Fixture(
+            "capital one second purchase same card",
+            n("com.ie.capitalone.uk", title = "ALIEXPRESS.COM", text = "£1.74 on card ending 7813. That leaves £202.51 available to spend"),
+            true, TransactionDirection.EXPENSE, 174, merchantContains = "ALIEXPRESS",
+        ),
     )
 }

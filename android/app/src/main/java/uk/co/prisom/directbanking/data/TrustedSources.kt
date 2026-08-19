@@ -86,6 +86,11 @@ object TrustedSources {
         Trusted("com.rbs.mobile.android.natwest", "NatWest"),
         Trusted("uk.co.hsbc.hsbcukmobilebanking", "HSBC"),
         Trusted("uk.co.santander.santanderUK", "Santander"),
+        // Verified from the device's own Play Store listing (share-link id=…),
+        // not guessed — see CapitalOneParser.kt. Package trust proves source
+        // identity only; it never overrides DECLINED/UPCOMING/FAILED/PENDING/
+        // REFUNDED semantic lifecycle classification (see classifier.ts).
+        Trusted("com.ie.capitalone.uk", "Capital One"),
     )
 
     private val byPackage = all.associateBy { it.packageName }

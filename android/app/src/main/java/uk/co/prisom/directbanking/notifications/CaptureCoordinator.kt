@@ -49,6 +49,10 @@ class CaptureCoordinator(
             importResult = o.outcome.name,
             transactionId = o.transactionId,
             failureReason = o.reason,
+            parserSelected = o.parserSelected,
+            semanticResult = o.reason,
+            amountCandidateCount = o.amountCandidateCount,
+            selectedAmountRole = if (o.amountMinor != null) "TRANSACTION_AMOUNT" else null,
         )
 
         when (o.outcome) {
@@ -59,7 +63,15 @@ class CaptureCoordinator(
             }
             ImportOutcome.REVIEW_REQUIRED -> {
                 SyncScheduler.syncNow(appContext)
-                notifier.postReview(o.amountMinor ?: 0, o.currency ?: "GBP", o.merchant)
+                // o.amountMinor stays null (not 0) when extraction genuinely
+                // failed — postReview() renders that as "review amount", never
+                // a misleading "review £0.00" (round-2 §8).
+                notifier.postReview(o.amountMinor, o.currency ?: "GBP", o.merchant)
+            }
+            ImportOutcome.ACCOUNT_MAPPING_REQUIRED -> {
+                // The amount/merchant are already correctly parsed — this is
+                // never a £0.00 placeholder, just a missing account to pick.
+                notifier.postReview(o.amountMinor, o.currency ?: "GBP", o.merchant)
             }
             ImportOutcome.SYNC_FAILED -> SyncScheduler.syncNow(appContext) // retry the queued auto op
             ImportOutcome.SETUP_REQUIRED, ImportOutcome.DUPLICATE, ImportOutcome.REJECTED -> Unit

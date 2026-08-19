@@ -40,6 +40,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import uk.co.prisom.directbanking.data.TrustedSources
 import uk.co.prisom.directbanking.data.local.db.ParsedImportEntity
 import uk.co.prisom.directbanking.parsing.Money
 import uk.co.prisom.directbanking.ui.EmptyState
@@ -64,6 +65,14 @@ fun ReviewImportsScreen(vm: ReviewViewModel) {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ReviewCard(item: ParsedImportEntity, ref: ReviewRefData?, vm: ReviewViewModel) {
+    // A recognised purchase whose account couldn't be resolved (round-2 §5/§12)
+    // gets its own read-only card — the amount/merchant/card are already
+    // correctly parsed, so this is never the "please type the amount in"
+    // editable form, and never a blank/zero placeholder either.
+    if (item.reviewState == "ACCOUNT_MAPPING_REQUIRED") {
+        AccountMappingReviewCard(item, ref, vm)
+        return
+    }
     var amountText by remember(item.fingerprint) { mutableStateOf(minorToText(item.amountMinor)) }
     var isIncome by remember(item.fingerprint) { mutableStateOf(item.direction == "INCOME") }
     var merchant by remember(item.fingerprint) { mutableStateOf(item.merchant ?: "") }
@@ -137,6 +146,56 @@ private fun ReviewCard(item: ParsedImportEntity, ref: ReviewRefData?, vm: Review
             confirmButton = { TextButton(onClick = { dateState.selectedDateMillis?.let { occurredAt = it }; showDate = false }) { Text("OK") } },
             dismissButton = { TextButton(onClick = { showDate = false }) { Text("Cancel") } },
         ) { DatePicker(state = dateState) }
+    }
+}
+
+/**
+ * A recognised card purchase whose account couldn't be resolved (round-2 §5/
+ * §12) — read-only, correctly-parsed details (never £0.00), with an explicit
+ * account picker rather than the generic "type the amount in" review form.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AccountMappingReviewCard(item: ParsedImportEntity, ref: ReviewRefData?, vm: ReviewViewModel) {
+    var accountId by remember(item.fingerprint) { mutableStateOf<String?>(null) }
+    val sourceLabel = TrustedSources.displayName(item.sourcePackage) ?: item.sourcePackage
+
+    Card(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Column(Modifier.padding(16.dp)) {
+            Text(sourceLabel, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(item.merchant ?: item.title, style = MaterialTheme.typography.titleMedium)
+            Text(Money.format(item.amountMinor, item.currency), style = MaterialTheme.typography.titleLarge)
+            item.accountHint?.let { Text("Card ••••$it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+
+            Spacer(Modifier.height(12.dp))
+            Text("Reason", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Select which account this card belongs to", style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(8.dp))
+
+            PickerField("Account", accountId, ref?.accounts?.map { it.id to it.name } ?: emptyList()) { accountId = it }
+
+            Spacer(Modifier.height(12.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        accountId?.let { id ->
+                            vm.approve(
+                                fingerprint = item.fingerprint,
+                                accountId = id,
+                                categoryId = null,
+                                amountMinor = item.amountMinor,
+                                direction = item.direction,
+                                merchant = item.merchant,
+                                occurredAtMillis = item.occurredAtMillis,
+                                notes = null,
+                            )
+                        }
+                    },
+                    enabled = accountId != null,
+                ) { Text("Link account") }
+                OutlinedButton(onClick = { /* leave queued exactly as-is — no action needed to "keep for review" */ }) { Text("Keep for review") }
+            }
+        }
     }
 }
 

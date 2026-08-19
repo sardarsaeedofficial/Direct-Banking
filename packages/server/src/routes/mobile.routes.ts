@@ -752,18 +752,70 @@ mobileRouter.post(
     const c = validated<typeof notifAutoImportSchema>(res);
     const userId = req.mobileAuth!.userId;
 
-    const account = await prisma.bankAccount.findFirst({ where: { id: c.accountId, userId } });
-    if (!account) throw new HttpError(404, "Account not found");
-
     // Fast-path duplicate: return the existing result without any change.
+    // Checked before account resolution — a duplicate never needs an account.
     const existing = await prisma.notificationImport.findUnique({ where: { userId_sourceHash: { userId, sourceHash: c.fingerprint } } });
     if (existing) {
       const txn = existing.approvedTransactionId
         ? await prisma.transaction.findUnique({ where: { id: existing.approvedTransactionId }, include: { merchant: true, category: true, account: true } })
         : null;
-      res.status(200).json({ import: existing, transaction: txn, duplicate: true, result: "DUPLICATE" });
+      res.status(200).json({ import: existing, transaction: txn, duplicate: true, result: existing.approvedTransactionId ? "AUTO_IMPORTED" : "DUPLICATE" });
       return;
     }
+
+    // Resolve the destination account. A client that already knows which
+    // account (e.g. a per-source default mapping) sends accountId directly —
+    // validated exactly as before. A client that doesn't (e.g. a credit-card
+    // purchase before its card has been mapped to an account) omits it and
+    // relies on accountHint (the card/account last 4 digits) instead: exactly
+    // one of the user's own accounts matching that hint resolves
+    // automatically; zero or more than one is never guessed — the event goes
+    // to Review instead, and is NEVER silently attached to some other,
+    // already-configured account just because one happens to exist.
+    let accountId: string | null = c.accountId ?? null;
+    if (accountId) {
+      const account = await prisma.bankAccount.findFirst({ where: { id: accountId, userId } });
+      if (!account) throw new HttpError(404, "Account not found");
+    } else if (c.accountHint) {
+      const matches = await prisma.bankAccount.findMany({
+        where: { userId, lastFour: c.accountHint, isArchived: false },
+        select: { id: true },
+      });
+      if (matches.length === 1) accountId = matches[0]!.id;
+    }
+
+    if (!accountId) {
+      // No account could be resolved — never posted, never guessed. Recorded
+      // as an ordinary reviewable NotificationImport (the same shape/queue the
+      // plain POST /notification-imports route uses) so the user can map or
+      // create the right account and approve it via the existing Review
+      // Centre flow (PATCH /notification-imports/:id, action=approve) — no new
+      // endpoint needed. Carries the already-correctly-parsed merchant/amount/
+      // card-hint, so the client never has to show a placeholder £0.00.
+      const created = await prisma.notificationImport.create({
+        data: {
+          userId,
+          deviceId: req.mobileAuth!.deviceRowId,
+          sourcePackage: c.sourcePackage,
+          title: c.title || (c.merchant ?? "Transaction"),
+          message: c.redactedSourceText,
+          redactedText: c.redactedSourceText,
+          receivedAt: new Date(c.occurredAt),
+          parsedMerchant: c.merchant ?? null,
+          parsedAmountMinor: BigInt(c.amountMinor),
+          parsedAccount: c.accountHint ?? null,
+          direction: c.direction,
+          currency: c.currency,
+          confidence: c.confidence,
+          reviewState: "REVIEW_REQUIRED",
+          sourceHash: c.fingerprint,
+          status: NotifStatus.PENDING,
+        },
+      });
+      res.status(201).json({ import: created, transaction: null, duplicate: false, result: "ACCOUNT_MAPPING_REQUIRED" });
+      return;
+    }
+    const resolvedAccountId: string = accountId; // narrowed once here — TS can't see the guard above through the $transaction closure below
 
     try {
       const out = await prisma.$transaction(async (tx) => {
@@ -780,7 +832,7 @@ mobileRouter.post(
         const ingested = await ingestFinancialEvent(
           userId,
           {
-            accountId: c.accountId,
+            accountId: resolvedAccountId, // resolved above — either the client's own or matched by card/account hint
             sourcePackage: c.sourcePackage,
             sourceFingerprint: c.fingerprint,
             trustedSource,

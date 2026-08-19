@@ -646,3 +646,256 @@ describe("Financial Event Intelligence — unified Activity API (§4 dedup + §3
     expect(byDirection.json.items.some((i: any) => i.displayName === "Tesco")).toBe(true);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// Capital One notification-parser fixes (fixes "Transaction detected —
+// review £0.00" for real Capital One card-purchase notifications). One
+// shared registered user across this whole block (rather than one register()
+// per scenario) — /auth/register sits behind authLimiter (20 per 15 min, see
+// middleware/rateLimit.ts) and this file already spends most of that budget
+// on the describe blocks above.
+// ─────────────────────────────────────────────────────────────────────────
+describe("Capital One notification parser — PENDING card-authorisation, account mapping, dedup", () => {
+  let userId: string;
+  let accessToken: string;
+  const CAPITAL_ONE_PKG = "com.ie.capitalone.uk";
+
+  beforeAll(async () => {
+    if (!ready) return;
+    const fixture = await register();
+    userId = fixture.userId;
+    accessToken = fixture.accessToken;
+  });
+
+  async function newCreditCardAccount(lastFour: string, openingMinor = 0n) {
+    return prisma.bankAccount.create({
+      data: { userId, bankName: "Capital One", nickname: "Capital One", accountType: "CREDIT_CARD", lastFour, balanceMinor: openingMinor },
+    });
+  }
+
+  it("a real Capital One card purchase classifies PENDING with the correct amount — never £0.00, never a second transaction for the available-to-spend figure", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const acc = await newCreditCardAccount("7813");
+
+    const res = await auto(accessToken, {
+      sourcePackage: CAPITAL_ONE_PKG, title: "ALIEXPRESS.COM",
+      redactedSourceText: "£4.88 on card ending 7813. That leaves £202.51 available to spend",
+      direction: "EXPENSE", amountMinor: 488, merchant: "ALIEXPRESS.COM", accountHint: "7813", accountId: acc.id,
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.json.transaction).toBeNull(); // PENDING never posts
+    expect(res.json.result).not.toBe("AUTO_IMPORTED");
+
+    const event = await prisma.financialEvent.findFirst({ where: { userId, accountId: acc.id }, orderBy: { createdAt: "desc" } });
+    expect(event).toBeTruthy();
+    expect(event.lifecycle).toBe("PENDING");
+    expect(event.amountMinor).toBe(488); // never 0, never the £202.51 available-to-spend figure
+    expect(event.merchantName).toBe("ALIEXPRESS.COM");
+    expect(await prisma.transaction.count({ where: { userId, accountId: acc.id } })).toBe(0);
+  });
+
+  it("two different Capital One purchases (different amounts) create two separate PENDING events, never deduplicated", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const acc = await newCreditCardAccount("1111");
+    const t0 = new Date("2026-08-15T09:00:00Z");
+
+    const first = await auto(accessToken, {
+      sourcePackage: CAPITAL_ONE_PKG, title: "ALIEXPRESS.COM",
+      redactedSourceText: "£4.88 on card ending 1111. That leaves £202.51 available to spend",
+      direction: "EXPENSE", amountMinor: 488, merchant: "ALIEXPRESS.COM", accountHint: "1111", accountId: acc.id,
+      occurredAt: t0.toISOString(),
+    });
+    const second = await auto(accessToken, {
+      sourcePackage: CAPITAL_ONE_PKG, title: "ALIEXPRESS.COM",
+      redactedSourceText: "£1.74 on card ending 1111. That leaves £202.51 available to spend",
+      direction: "EXPENSE", amountMinor: 174, merchant: "ALIEXPRESS.COM", accountHint: "1111", accountId: acc.id,
+      occurredAt: new Date(t0.getTime() + 3_600_000).toISOString(),
+    });
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    const events = await prisma.financialEvent.findMany({ where: { userId, accountId: acc.id }, orderBy: { amountMinor: "asc" } });
+    expect(events.length).toBe(2); // never merged into one
+    expect(events.map((e: any) => e.amountMinor)).toEqual([174, 488]);
+    expect(events.every((e: any) => e.lifecycle === "PENDING")).toBe(true);
+  });
+
+  it("resending the identical Capital One notification (same fingerprint) is idempotent — no duplicate event", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const acc = await newCreditCardAccount("2222");
+    const body = {
+      fingerprint: fp(), sourcePackage: CAPITAL_ONE_PKG, title: "ALIEXPRESS.COM",
+      redactedSourceText: "£4.88 on card ending 2222. That leaves £202.51 available to spend",
+      direction: "EXPENSE", amountMinor: 488, merchant: "ALIEXPRESS.COM", accountHint: "2222", accountId: acc.id,
+      currency: "GBP", occurredAt: new Date().toISOString(), confidence: 0.9,
+    };
+    const first = await api("POST", "/notification-imports/auto", { token: accessToken, body });
+    const second = await api("POST", "/notification-imports/auto", { token: accessToken, body });
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(200);
+    expect(second.json.duplicate).toBe(true);
+    expect(await prisma.financialEvent.count({ where: { userId, accountId: acc.id } })).toBe(1);
+  });
+
+  it("a declined Capital One card purchase classifies DECLINED with no ledger effect, even though the source is trusted", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const acc = await newCreditCardAccount("3333");
+
+    const res = await auto(accessToken, {
+      sourcePackage: CAPITAL_ONE_PKG, title: "ALIEXPRESS.COM",
+      redactedSourceText: "Your £4.88 payment on card ending 3333 was declined",
+      direction: "EXPENSE", amountMinor: 488, merchant: "ALIEXPRESS.COM", accountHint: "3333", accountId: acc.id,
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.json.transaction).toBeNull();
+    const event = await prisma.financialEvent.findFirst({ where: { userId, accountId: acc.id }, orderBy: { createdAt: "desc" } });
+    expect(event.lifecycle).toBe("DECLINED");
+    expect(event.ledgerImpact).toBe("NONE");
+    expect(await prisma.transaction.count({ where: { userId, accountId: acc.id } })).toBe(0);
+  });
+
+  it("Capital One refund wording classifies REFUNDED, never a second purchase debit", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const acc = await newCreditCardAccount("4444");
+
+    const res = await auto(accessToken, {
+      sourcePackage: CAPITAL_ONE_PKG, title: "ALIEXPRESS.COM",
+      redactedSourceText: "£4.88 refunded to card ending 4444",
+      direction: "INCOME", amountMinor: 488, merchant: "ALIEXPRESS.COM", accountHint: "4444", accountId: acc.id,
+    });
+
+    expect(res.status).toBe(201);
+    const event = await prisma.financialEvent.findFirst({ where: { userId, accountId: acc.id }, orderBy: { createdAt: "desc" } });
+    expect(event.lifecycle).toBe("REFUNDED");
+    // Never posted as a fresh EXPENSE/purchase debit.
+    expect(await prisma.transaction.count({ where: { userId, accountId: acc.id, direction: "EXPENSE" } })).toBe(0);
+  });
+
+  it("the server rejects amountMinor=0 outright — a genuinely-zero notification can never reach the ledger as a parsed amount", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const res = await auto(accessToken, {
+      sourcePackage: CAPITAL_ONE_PKG, title: "ALIEXPRESS.COM",
+      redactedSourceText: "£0.00 on card ending 5555",
+      direction: "EXPENSE", amountMinor: 0, merchant: "ALIEXPRESS.COM", accountHint: "5555", accountId: (await newCreditCardAccount("5555")).id,
+    });
+    expect(res.status).toBe(400); // schema requires amountMinor.positive()
+  });
+
+  it("account resolution by card last-4: exactly one matching account auto-resolves without an explicit accountId", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const acc = await newCreditCardAccount("6001");
+
+    const res = await auto(accessToken, {
+      sourcePackage: CAPITAL_ONE_PKG, title: "ALIEXPRESS.COM",
+      redactedSourceText: "£4.88 on card ending 6001. That leaves £202.51 available to spend",
+      direction: "EXPENSE", amountMinor: 488, merchant: "ALIEXPRESS.COM", accountHint: "6001",
+      // accountId deliberately omitted — resolved server-side by card hint.
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.json.result).not.toBe("ACCOUNT_MAPPING_REQUIRED");
+    const event = await prisma.financialEvent.findFirst({ where: { userId, accountId: acc.id } });
+    expect(event).toBeTruthy();
+    expect(event.amountMinor).toBe(488);
+  });
+
+  it("account resolution: no matching account -> ACCOUNT_MAPPING_REQUIRED, correct amount/merchant/card retained, never mapped to an unrelated account", async (ctx) => {
+    if (!ready) return ctx.skip();
+    // A different, unrelated CURRENT account already exists for this user
+    // (from earlier tests / real usage) — it must never be silently used.
+    const res = await auto(accessToken, {
+      sourcePackage: CAPITAL_ONE_PKG, title: "ALIEXPRESS.COM",
+      redactedSourceText: "£9.99 on card ending 6002. That leaves £190.00 available to spend",
+      direction: "EXPENSE", amountMinor: 999, merchant: "ALIEXPRESS.COM", accountHint: "6002",
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.json.result).toBe("ACCOUNT_MAPPING_REQUIRED");
+    expect(res.json.transaction).toBeNull();
+    expect(res.json.duplicate).toBe(false);
+    // Never £0.00 — the already-correctly-parsed amount/merchant are retained
+    // on the reviewable NotificationImport (round-2 §8/§12).
+    expect(Number(res.json.import.parsedAmountMinor)).toBe(999);
+    expect(res.json.import.parsedMerchant).toBe("ALIEXPRESS.COM");
+    expect(res.json.import.parsedAccount).toBe("6002");
+    // No FinancialEvent was created for this notification at all — with no
+    // account resolved there is nothing to attach one to.
+    expect(await prisma.financialEvent.count({ where: { userId, amountMinor: 999, merchantName: "ALIEXPRESS.COM" } })).toBe(0);
+  });
+
+  it("account resolution: two accounts matching the same card last-4 is ambiguous -> ACCOUNT_MAPPING_REQUIRED, never guessed", async (ctx) => {
+    if (!ready) return ctx.skip();
+    await newCreditCardAccount("6003");
+    await newCreditCardAccount("6003"); // a second, ambiguous match
+
+    const res = await auto(accessToken, {
+      sourcePackage: CAPITAL_ONE_PKG, title: "ALIEXPRESS.COM",
+      redactedSourceText: "£3.33 on card ending 6003. That leaves £150.00 available to spend",
+      direction: "EXPENSE", amountMinor: 333, merchant: "ALIEXPRESS.COM", accountHint: "6003",
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.json.result).toBe("ACCOUNT_MAPPING_REQUIRED");
+    expect(await prisma.financialEvent.count({ where: { userId, sourcePackage: CAPITAL_ONE_PKG, amountMinor: 333 } })).toBe(0);
+  });
+
+  it("a Capital One purchase is never mapped to an unrelated already-configured current account just because one exists", async (ctx) => {
+    if (!ready) return ctx.skip();
+    // The user has an ordinary current account (e.g. Monzo) already mapped —
+    // it must never be used as a fallback for a Capital One card purchase.
+    const currentAcc = await newAccount(userId, 500000n);
+    const beforeBalance = await balance(currentAcc.id);
+
+    const res = await auto(accessToken, {
+      sourcePackage: CAPITAL_ONE_PKG, title: "ALIEXPRESS.COM",
+      redactedSourceText: "£6.66 on card ending 6004. That leaves £100.00 available to spend",
+      direction: "EXPENSE", amountMinor: 666, merchant: "ALIEXPRESS.COM", accountHint: "6004",
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.json.result).toBe("ACCOUNT_MAPPING_REQUIRED");
+    expect(await balance(currentAcc.id)).toBe(beforeBalance); // untouched
+    expect(await prisma.financialEvent.count({ where: { userId, accountId: currentAcc.id } })).toBe(0);
+  });
+
+  it("a Capital One purchase (once completed) counts as ordinary spending, but a credit-card repayment to Capital One never double-counts it", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const ccAcc = await newCreditCardAccount("7001", 0n);
+    const currentAcc = await newAccount(userId, 300000n);
+
+    // A definitive completion notification (not the ambiguous auth-hold
+    // wording) for the same purchase — classifies COMPLETED and posts once.
+    const purchase = await auto(accessToken, {
+      sourcePackage: CAPITAL_ONE_PKG, title: "ALIEXPRESS.COM",
+      redactedSourceText: "You spent £4.88 at ALIEXPRESS.COM",
+      direction: "EXPENSE", amountMinor: 488, merchant: "ALIEXPRESS.COM", accountHint: "7001", accountId: ccAcc.id,
+      confidence: 0.95,
+    });
+    expect(purchase.status).toBe(201);
+    expect(purchase.json.result).toBe("AUTO_IMPORTED");
+    const purchaseTxn = await prisma.transaction.findUnique({ where: { id: purchase.json.transaction.id } });
+    expect(purchaseTxn.transactionType).not.toBe("CREDIT_CARD_REPAYMENT");
+
+    // The later repayment from the current account to Capital One.
+    const repayment = await auto(accessToken, {
+      sourcePackage: "co.uk.monzo", title: "Monzo",
+      redactedSourceText: "Your monthly repayment of £254.43 to Capital One has left your account",
+      direction: "EXPENSE", amountMinor: 25443, merchant: "Capital One", accountId: currentAcc.id,
+    });
+    expect(repayment.status).toBe(201);
+    expect(repayment.json.result).toBe("AUTO_IMPORTED");
+    const repaymentTxn = await prisma.transaction.findUnique({ where: { id: repayment.json.transaction.id } });
+    expect(repaymentTxn.transactionType).toBe("CREDIT_CARD_REPAYMENT");
+
+    // Insights: the purchase counts as spending exactly once; the repayment
+    // is excluded from spending entirely (never double-counted).
+    const overview = await api("GET", "/insights/overview", { token: accessToken });
+    expect(overview.status).toBe(200);
+    const gbp = overview.json.summary.currencies.find((c: any) => c.currency === "GBP");
+    // Only the £4.88 purchase should count — the £254.43 repayment must be excluded.
+    expect(gbp.spendingMinor).toBe(488);
+  });
+});

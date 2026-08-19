@@ -90,6 +90,17 @@ const CANCELLED_RE = /\bcancell?ed\b/i;
 // both "upcoming" (hasn't started) and "completed" (finished). A merchant
 // authorisation hold is the same underlying state under a different name.
 const PENDING_RE = /\bpending\b|\bauthorisation\s+hold\b|\bawaiting\s+authoris/i;
+// Real-time card-authorisation push notifications ("£4.88 on card ending
+// 7813. That leaves £202.51 available to spend") are sent the instant a card
+// is authorised, before the transaction has posted/settled to the statement
+// — typically 1-3 business days for UK card issuers (Capital One's own app
+// shows these as "Pending"). Wording-based, not package-gated, so it applies
+// to any bank using this phrasing, not only Capital One. Deliberately
+// conservative rather than assuming COMPLETED — see §4 of the brief ("do not
+// invent certainty"); a later Plaid/Open Banking/statement signal for the
+// same amount/account/merchant reconciles it via the existing pending-event
+// matching in financial-event.service.ts.
+const CARD_AUTH_HOLD_RE = /\bon\s+card\s+ending\b.{0,100}\b(?:that\s+leaves|available\s+to\s+spend|available\s+balance)\b/i;
 
 // Future/upcoming language (§15) — deliberately anchored to phrases that only
 // make sense describing something that hasn't happened yet, so ordinary
@@ -184,6 +195,7 @@ function detectLifecycleFromText(text: string): { lifecycle: FinEventLifecycle |
   if (CANCELLED_RE.test(text)) return { lifecycle: "CANCELLED", reasonCode: "CANCEL_PHRASE" };
   if (hasFutureLanguage(text)) return { lifecycle: "UPCOMING", reasonCode: "FUTURE_PHRASE" };
   if (PENDING_RE.test(text)) return { lifecycle: "PENDING", reasonCode: "PENDING_PHRASE" };
+  if (CARD_AUTH_HOLD_RE.test(text)) return { lifecycle: "PENDING", reasonCode: "CARD_AUTH_HOLD_PHRASE" };
   return { lifecycle: null, reasonCode: null };
 }
 
@@ -192,12 +204,87 @@ function detectLifecycleFromText(text: string): { lifecycle: FinEventLifecycle |
 // only a number actually prefixed by a currency symbol/code counts, with a
 // decimal-format bare number as a weaker fallback (account numbers are never
 // written with 2 decimal places).
-const CURRENCY_AMOUNT_RE = /(?:£|gbp\s*)(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/i;
+const CURRENCY_AMOUNT_RE = /(?:£|gbp\s*)(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/gi;
 const DECIMAL_AMOUNT_RE = /\b(\d{1,3}(?:,\d{3})*\.\d{2})\b/;
+
+// ---------------------------------------------------------------------------
+// Multi-amount semantic role extraction. A single notification frequently
+// carries more than one monetary value with different meanings ("£4.88 on
+// card ending 7813. That leaves £202.51 available to spend") — neither "the
+// first amount" nor "the largest amount" is a safe rule for picking the
+// transaction amount. Each amount is classified by the wording of its OWN
+// sentence (never a neighbouring one, so "Balance £1,000" in a later
+// sentence never contaminates an earlier "£80 will leave tomorrow").
+// ---------------------------------------------------------------------------
+
+export type AmountRole =
+  | "TRANSACTION_AMOUNT" | "AVAILABLE_BALANCE" | "ACCOUNT_BALANCE" | "CREDIT_LIMIT"
+  | "EXPECTED_AMOUNT" | "FEE" | "REFUND_AMOUNT" | "UNKNOWN";
+
+export interface AmountCandidate {
+  amountMinor: number;
+  role: AmountRole;
+  raw: string;
+}
+
+// A real-time, post-transaction spending-power figure — always contextual,
+// never the transaction amount itself.
+const AVAILABLE_BALANCE_PHRASE_RE = /\bthat\s+leaves\b|\bavailable\s+to\s+spend\b|\bavailable\s+balance\b|\bavailable\s+credit\b|\bcredit\s+available\b/i;
+// A plain account/statement balance figure.
+const ACCOUNT_BALANCE_PHRASE_RE = /\bremaining\s+balance\b|\bbalance\s+is\b|\bcurrent\s+balance\b|\bnew\s+balance\b|\bbalance\b/i;
+const CREDIT_LIMIT_PHRASE_RE = /\bcredit\s+limit\b/i;
+const FEE_PHRASE_RE = /\b(?:admin\s+)?fee\b/i;
+const REFUND_PHRASE_RE = /\brefund(?:ed)?\b/i;
+
+// Roles that must NEVER be selected as the transaction amount — a balance,
+// limit or fee figure is never posted as a purchase, income, or refund.
+const EXCLUDED_AMOUNT_ROLES: ReadonlySet<AmountRole> = new Set(["AVAILABLE_BALANCE", "ACCOUNT_BALANCE", "CREDIT_LIMIT", "FEE"]);
+
+function splitSentences(text: string): string[] {
+  return text.split(/(?<=[.!?])\s+/).filter((s) => s.length > 0);
+}
+
+function roleForSentence(sentence: string): AmountRole {
+  if (AVAILABLE_BALANCE_PHRASE_RE.test(sentence)) return "AVAILABLE_BALANCE";
+  if (ACCOUNT_BALANCE_PHRASE_RE.test(sentence)) return "ACCOUNT_BALANCE";
+  if (CREDIT_LIMIT_PHRASE_RE.test(sentence)) return "CREDIT_LIMIT";
+  if (FEE_PHRASE_RE.test(sentence)) return "FEE";
+  if (REFUND_PHRASE_RE.test(sentence)) return "REFUND_AMOUNT";
+  if (hasFutureLanguage(sentence)) return "EXPECTED_AMOUNT";
+  return "TRANSACTION_AMOUNT";
+}
+
+/** Every currency-anchored amount in [text], tagged with its semantic role.
+ *  Never includes a bare (non-currency-prefixed) number — an account's
+ *  last-4-digits or a reference number is never a candidate at all. */
+export function extractAmountCandidates(text: string): AmountCandidate[] {
+  const candidates: AmountCandidate[] = [];
+  for (const sentence of splitSentences(text)) {
+    const role = roleForSentence(sentence);
+    const re = new RegExp(CURRENCY_AMOUNT_RE.source, CURRENCY_AMOUNT_RE.flags);
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(sentence))) {
+      const cleaned = m[1]!.replace(/,/g, "");
+      const value = Math.round(parseFloat(cleaned) * 100);
+      if (Number.isFinite(value) && value > 0) candidates.push({ amountMinor: value, role, raw: m[0] });
+    }
+  }
+  return candidates;
+}
 
 export function extractAmountMinor(text: string): number | null {
   if (!/£|gbp|paid|spent|payment|charged|debited|repayment|declined|failed/i.test(text)) return null;
-  const m = CURRENCY_AMOUNT_RE.exec(text) ?? DECIMAL_AMOUNT_RE.exec(text);
+  const candidates = extractAmountCandidates(text);
+  const selectable = candidates.find((c) => !EXCLUDED_AMOUNT_ROLES.has(c.role));
+  if (selectable) return selectable.amountMinor;
+  // Currency-anchored amounts exist but every one of them is a balance/limit/
+  // fee figure (e.g. a pure balance-summary notification with no transaction
+  // amount at all) — never guess one of those as the transaction amount.
+  if (candidates.length > 0) return null;
+  // No currency-anchored amount anywhere — weaker bare-decimal fallback,
+  // unchanged from before this round (account numbers are never written with
+  // 2 decimal places, so this stays safe).
+  const m = DECIMAL_AMOUNT_RE.exec(text);
   if (!m) return null;
   const cleaned = m[1]!.replace(/,/g, "");
   const value = Math.round(parseFloat(cleaned) * 100);
@@ -212,8 +299,12 @@ export function extractAccountLast4(text: string): string | null {
 /** Extract an explicit merchant/source-account label from free text ("from
  *  your Monzo account", "to MANCHESTER C C"). Falls back to null. */
 export function extractMerchant(text: string): string | null {
-  const toFrom = /(?:to|from)\s+(?:your\s+)?([A-Za-z0-9&'. -]{2,40}?)(?:\s+account\b|\s+leaves\b|\s+leaving\b|\s+will\b|,|\.|$)/i.exec(text);
-  if (toFrom) return toFrom[1]!.trim().replace(/[.,]$/, "");
+  // "available to spend"/"available to spend today" is a spending-power
+  // idiom, never a merchant/account name — a bare "(?:to|from)" match would
+  // otherwise capture "spend" out of it (see the Capital One card-
+  // authorisation wording this guards against).
+  const toFrom = /(?<!available\s)(?:to|from)\s+(?:your\s+)?([A-Za-z0-9&'. -]{2,40}?)(?:\s+account\b|\s+leaves\b|\s+leaving\b|\s+will\b|,|\.|$)/i.exec(text);
+  if (toFrom && toFrom[1]!.trim().toLowerCase() !== "spend") return toFrom[1]!.trim().replace(/[.,]$/, "");
   return null;
 }
 
