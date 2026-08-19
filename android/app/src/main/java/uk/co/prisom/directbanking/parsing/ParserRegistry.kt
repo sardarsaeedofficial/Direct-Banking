@@ -14,11 +14,19 @@ class ParserRegistry(
         return generic.parse(input)
     }
 
+    /** Which parser handles this source — diagnostics only, never used to
+     *  change parsing behaviour (see DiagnosticsRepository.parserSelected). */
+    fun selectedParserName(sourcePackage: String): String {
+        val adapter = adapters.firstOrNull { it.handles(sourcePackage) }
+        return adapter?.let { it::class.simpleName ?: "BankAdapter" } ?: "Generic"
+    }
+
     companion object {
         fun defaultAdapters(): List<BankParserAdapter> = listOf(
             MonzoParser(),
             StarlingParser(),
             RevolutParser(),
+            CapitalOneParser(),
         )
     }
 }

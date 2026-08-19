@@ -27,6 +27,19 @@ data class DiagnosticsSnapshot(
     val importResult: String? = null,
     val transactionId: String? = null,
     val failureReason: String? = null,
+    // ---- Round-2 (§1): diagnosable without exposing every notification body ----
+    /** Which parser matched this source ("CapitalOneParser", "Generic", …). */
+    val parserSelected: String? = null,
+    /** The capture pipeline's own free-text account of what happened
+     *  (e.g. "missing amount or direction", "select which account this
+     *  belongs to", "auto-imported"). */
+    val semanticResult: String? = null,
+    /** How many distinct currency-signalled amounts the notification text
+     *  carried — 2+ is exactly the shape ("transaction amount" + "available
+     *  to spend") that used to silently fail. */
+    val amountCandidateCount: Int? = null,
+    /** Coarse role of the amount actually used, when one was produced. */
+    val selectedAmountRole: String? = null,
 )
 
 /** In-memory diagnostics for the notification pipeline (no raw text retained). */
@@ -60,6 +73,10 @@ class DiagnosticsRepository {
         importResult: String,
         transactionId: String?,
         failureReason: String,
+        parserSelected: String? = null,
+        semanticResult: String? = null,
+        amountCandidateCount: Int? = null,
+        selectedAmountRole: String? = null,
     ) {
         _state.value = _state.value.copy(
             lastPackage = pkg,
@@ -82,6 +99,10 @@ class DiagnosticsRepository {
             importResult = importResult,
             transactionId = transactionId,
             failureReason = failureReason,
+            parserSelected = parserSelected,
+            semanticResult = semanticResult,
+            amountCandidateCount = amountCandidateCount,
+            selectedAmountRole = selectedAmountRole,
         )
     }
 }

@@ -17,14 +17,23 @@ import uk.co.prisom.directbanking.parsing.Money
 class AppNotifier(private val context: Context) {
 
     // Guarded by canPost(); notify() is wrapped in runCatching as a further safety net.
+    // [amountMinor] is nullable and MUST stay that way: null means "amount
+    // extraction failed", which is a genuinely different situation from an
+    // actual £0.00 stated by the bank. Showing "review £0.00" for an
+    // extraction failure is misleading — it reads as though the bank said
+    // zero, when really nothing was parsed at all.
     @SuppressLint("MissingPermission")
-    fun postReview(amountMinor: Long, currency: String, merchant: String?) {
+    fun postReview(amountMinor: Long?, currency: String, merchant: String?) {
         if (!canPost()) return
-        val amount = Money.format(amountMinor, currency)
+        val title = if (amountMinor != null) {
+            "Transaction detected — review ${Money.format(amountMinor, currency)}"
+        } else {
+            "Transaction detected — review amount"
+        }
         val where = merchant?.let { " at $it" } ?: ""
         val notification = NotificationCompat.Builder(context, DirectBankingApp.CHANNEL_REVIEW)
             .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
-            .setContentTitle("Transaction detected — review $amount")
+            .setContentTitle(title)
             .setContentText("Review$where before it's imported")
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setAutoCancel(true)

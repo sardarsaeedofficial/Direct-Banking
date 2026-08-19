@@ -28,6 +28,11 @@ export const KNOWN_BANKS: Record<string, string> = {
   "uk.co.hsbc": "HSBC",
   "com.barclays.android": "Barclays",
   "com.lloydsbank.android": "Lloyds",
+  // Verified from the device's own Play Store listing (share-link id=…), not
+  // guessed. Trust here only raises classifier confidence (see classifier.ts
+  // computeConfidence()) — it never overrides a DECLINED/UPCOMING/FAILED/
+  // PENDING/REFUNDED lifecycle determined from the notification's own text.
+  "com.ie.capitalone.uk": "Capital One",
 };
 
 interface Parsed {

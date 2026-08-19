@@ -314,7 +314,11 @@ data class NotifAutoImportRequest(
     val confidence: Double,
     val redactedSourceText: String = "",
     val title: String = "",
-    val accountId: String,
+    // Nullable: when the client doesn't yet know which account this belongs to
+    // (e.g. a card purchase before its account is mapped), the server attempts
+    // to resolve it from accountHint (card/account last 4) instead — see
+    // ImportRepository.capture() and AutoImportResult.AccountMappingRequired.
+    val accountId: String? = null,
     val categoryId: String? = null,
     // Phase 1 enrichment (all optional; never required).
     val senderName: String? = null,

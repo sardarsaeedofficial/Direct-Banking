@@ -19,7 +19,10 @@ interface ImportDao {
     @Query("SELECT * FROM parsed_import ORDER BY createdAtMillis DESC")
     fun observeAll(): Flow<List<ParsedImportEntity>>
 
-    @Query("SELECT * FROM parsed_import WHERE reviewState IN ('DRAFT','REVIEW_REQUIRED','UNRECOGNISED') AND localStatus NOT IN ('APPROVED','REJECTED','AUTO_IMPORTED','AUTO_PENDING') ORDER BY createdAtMillis DESC")
+    // ACCOUNT_MAPPING_REQUIRED (round-2 §5/§12: recognised purchase, unresolved
+    // account) belongs in this queue too — without it here, ReviewImportsScreen
+    // would never receive the row ImportRepository just upserted for it.
+    @Query("SELECT * FROM parsed_import WHERE reviewState IN ('DRAFT','REVIEW_REQUIRED','UNRECOGNISED','ACCOUNT_MAPPING_REQUIRED') AND localStatus NOT IN ('APPROVED','REJECTED','AUTO_IMPORTED','AUTO_PENDING') ORDER BY createdAtMillis DESC")
     fun observeReviewQueue(): Flow<List<ParsedImportEntity>>
 
     @Query("UPDATE parsed_import SET localStatus = :status, remoteId = :remoteId WHERE fingerprint = :fingerprint")

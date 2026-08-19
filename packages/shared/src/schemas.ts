@@ -281,10 +281,15 @@ export const notifImportCreateSchema = z.object({
 export type NotifImportCreateInput = z.infer<typeof notifImportCreateSchema>;
 
 // Atomic auto-import: create the import already approved AND its transaction in
-// one server transaction. Requires the destination account and a positive amount.
+// one server transaction. Requires a positive amount. `accountId` is optional —
+// when the client doesn't know which account a notification belongs to (e.g. a
+// credit-card purchase before the card's account has been mapped), the server
+// attempts to resolve it from `accountHint` (the card/account last-4) instead;
+// see /notification-imports/auto in mobile.routes.ts. Never silently falls back
+// to some other already-configured account when resolution is ambiguous.
 export const notifAutoImportSchema = notifImportCreateSchema.extend({
   amountMinor: minorAmount.positive(),
-  accountId: cuid,
+  accountId: cuid.optional().nullable(),
   categoryId: cuid.optional().nullable(),
 });
 export type NotifAutoImportInput = z.infer<typeof notifAutoImportSchema>;

@@ -29,6 +29,18 @@ object Money {
         return null
     }
 
+    /** How many distinct currency-signalled amounts appear in [text] — for
+     *  diagnostics only (a notification with several monetary values, e.g. a
+     *  transaction amount plus an "available to spend" balance, is exactly
+     *  the shape that used to fail silently — see CapitalOneParser). Never
+     *  used to change parsing behaviour. */
+    fun countAmounts(text: String): Int = AMOUNT.findAll(text).count { m ->
+        val lead = m.groupValues[2]
+        val trail = m.groupValues[4]
+        val cur = normaliseCurrency(lead) ?: normaliseCurrency(trail)
+        cur != null && (toMinor(m.groupValues[3]) ?: 0L) > 0L
+    }
+
     private fun normaliseCurrency(token: String): String? {
         if (token.isBlank()) return null
         SYMBOL_CURRENCY[token]?.let { return it }

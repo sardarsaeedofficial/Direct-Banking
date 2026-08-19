@@ -243,6 +243,56 @@ class ImportRepositoryTest {
         assertTrue(i.rows.isEmpty())
     }
 
+    // ---- Capital One: unmapped account resolved by card/account hint (round-2 §5/§12) ----
+
+    @Test fun `Capital One purchase with no default account but a card hint is resolved server-side and auto-imports`() = runTest {
+        val (s, i, y) = store(src("com.ie.capitalone.uk", "Capital One", account = null, trusted = true))
+        val out = repo(s, i, y, auto = { AutoImportResult.Imported("txn-co", "rem-co") })
+            .capture(raw("com.ie.capitalone.uk", "£4.88 on card ending 7813. That leaves £202.51 available to spend", title = "ALIEXPRESS.COM"), "Capital One")
+        assertEquals(ImportOutcome.AUTO_IMPORTED, out.outcome)
+        assertEquals(488L, out.amountMinor)
+        assertEquals("txn-co", out.transactionId)
+    }
+
+    @Test fun `Capital One purchase with no default account and no server-side match becomes ACCOUNT_MAPPING_REQUIRED, never a blank review item`() = runTest {
+        val (s, i, y) = store(src("com.ie.capitalone.uk", "Capital One", account = null, trusted = true))
+        val out = repo(s, i, y, auto = { AutoImportResult.AccountMappingRequired("remote-42") })
+            .capture(raw("com.ie.capitalone.uk", "£4.88 on card ending 7813. That leaves £202.51 available to spend", title = "ALIEXPRESS.COM"), "Capital One")
+        assertEquals(ImportOutcome.ACCOUNT_MAPPING_REQUIRED, out.outcome)
+        val row = i.rows.values.single()
+        assertEquals("ACCOUNT_MAPPING_REQUIRED", row.reviewState)
+        assertEquals("remote-42", row.remoteId)
+        assertEquals(488L, row.amountMinor) // never 0 — the already-correct amount is retained
+        assertEquals("ALIEXPRESS.COM", row.merchant)
+        assertEquals("7813", row.accountHint)
+    }
+
+    @Test fun `Capital One duplicate via the account-hint path is reported once`() = runTest {
+        val (s, i, y) = store(src("com.ie.capitalone.uk", "Capital One", account = null, trusted = true))
+        val r = repo(s, i, y, auto = { AutoImportResult.Duplicate("txn-co") })
+        val out = r.capture(raw("com.ie.capitalone.uk", "£4.88 on card ending 7813. That leaves £202.51 available to spend", title = "ALIEXPRESS.COM"), "Capital One")
+        assertEquals(ImportOutcome.DUPLICATE, out.outcome)
+    }
+
+    @Test fun `Capital One network failure via the account-hint path falls back to SETUP_REQUIRED, never loses the notification`() = runTest {
+        val (s, i, y) = store(src("com.ie.capitalone.uk", "Capital One", account = null, trusted = true))
+        val cap = FakeCapturedDao()
+        val out = repo(s, i, y, cap, auto = { AutoImportResult.Failed })
+            .capture(raw("com.ie.capitalone.uk", "£4.88 on card ending 7813. That leaves £202.51 available to spend", title = "ALIEXPRESS.COM"), "Capital One")
+        assertEquals(ImportOutcome.SETUP_REQUIRED, out.outcome)
+        assertNotNull("remembered for reprocessing once an account is mapped", cap.latestForSource("com.ie.capitalone.uk"))
+    }
+
+    @Test fun `an unmapped source with no card hint keeps the pre-existing SETUP_REQUIRED behaviour untouched`() = runTest {
+        // No "ending NNNN" anywhere in the text → candidate.accountHint is null → the
+        // new hint-resolution branch must never fire; must behave exactly as before.
+        val (s, i, y) = store(src("co.uk.getmondo", "Monzo", account = null, trusted = true))
+        val out = repo(s, i, y, auto = { AutoImportResult.AccountMappingRequired("should-not-be-called") })
+            .capture(raw("co.uk.getmondo", "You spent £5 at Tesco"), "Monzo")
+        assertEquals(ImportOutcome.SETUP_REQUIRED, out.outcome)
+        assertTrue(i.rows.isEmpty())
+    }
+
     @Test fun `nothing is captured before disclosure is accepted`() = runTest {
         val (s, i, y) = store(src("co.uk.getmondo", "Monzo", trusted = true))
         val out = ImportRepository(i, y, s, FakeCapturedDao(), FakeTokenStore(), uk.co.prisom.directbanking.parsing.ParserRegistry(), ApiFactory.json, disclosureAccepted = { false }, clock = { 5_000L })
