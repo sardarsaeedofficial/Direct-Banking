@@ -1,3 +1,4 @@
+import { logger } from "../../logger.js";
 import { getClassifier, transactionAiEnabled } from "./registry.js";
 import { parseClassifierOutput, type ClassifierInput, type ClassifierOutput } from "./types.js";
 
@@ -13,12 +14,28 @@ import { parseClassifierOutput, type ClassifierInput, type ClassifierOutput } fr
 // ---------------------------------------------------------------------------
 
 const AI_TIMEOUT_MS = 4000;
+const TIMEOUT = Symbol("transaction-ai-timeout");
 
 export type AiAdvisoryAction = "IGNORE" | "SUGGEST" | "ALLOW_AUTOMATIC";
 
 export interface AiAdvisoryDecision {
   action: AiAdvisoryAction;
   output: ClassifierOutput | null;
+}
+
+// ---------------------------------------------------------------------------
+// Observability (§7) — safe operational events only. Never logs the prompt,
+// the raw response, an API key, or any redacted-but-still-sensitive field —
+// only the provider name, a numeric confidence, and an outcome/action label.
+// ---------------------------------------------------------------------------
+
+type AiObservabilityEvent =
+  | "REQUESTED" | "SKIPPED_HIGH_CONFIDENCE" | "SUCCEEDED" | "TIMED_OUT"
+  | "MALFORMED_RESPONSE" | "PROVIDER_ERROR" | "SUGGESTION_ACCEPTED"
+  | "SUGGESTION_SURFACED" | "SUGGESTION_REJECTED";
+
+function logAiEvent(event: AiObservabilityEvent, meta?: { provider?: string; confidence?: number; action?: AiAdvisoryAction }): void {
+  logger.info(`transaction-ai.${event}`, meta);
 }
 
 /**
@@ -54,29 +71,58 @@ export function gradeAiOutput(output: ClassifierOutput | null, deterministicConf
  * a raw classifier reference.
  */
 export async function classifyAdvisory(input: ClassifierInput): Promise<ClassifierOutput | null> {
-  if (!transactionAiEnabled()) return null;
+  if (!transactionAiEnabled()) return null; // the expected default path — not logged; logging every ingestion while AI is off is noise, not observability
   const classifier = getClassifier();
+  logAiEvent("REQUESTED", { provider: classifier.name });
+
   let raced: unknown;
   try {
     raced = await Promise.race([
       classifier.classify(input),
-      new Promise<null>((resolve) => {
-        const t = setTimeout(() => resolve(null), AI_TIMEOUT_MS);
+      new Promise<typeof TIMEOUT>((resolve) => {
+        const t = setTimeout(() => resolve(TIMEOUT), AI_TIMEOUT_MS);
         // Don't keep the process alive just for this timer.
         (t as unknown as { unref?: () => void }).unref?.();
       }),
     ]);
   } catch {
-    return null; // provider error — advisory only, never propagated
+    // Provider error (HTTP error, rate limit, network failure, thrown
+    // exception) — advisory only, never propagated to the caller. Never
+    // logs the caught error itself: it may embed request/response detail
+    // from an HTTP client that this module has no way to guarantee is
+    // secret-free.
+    logAiEvent("PROVIDER_ERROR", { provider: classifier.name });
+    return null;
   }
-  if (raced == null) return null;
-  return parseClassifierOutput(raced);
+  if (raced === TIMEOUT) {
+    logAiEvent("TIMED_OUT", { provider: classifier.name });
+    return null;
+  }
+  if (raced == null) return null; // classifier had no opinion — not an error
+
+  const parsed = parseClassifierOutput(raced);
+  if (!parsed) {
+    logAiEvent("MALFORMED_RESPONSE", { provider: classifier.name });
+    return null;
+  }
+  logAiEvent("SUCCEEDED", { provider: classifier.name, confidence: parsed.confidence });
+  return parsed;
 }
 
 /** Convenience: call + grade in one step, given the deterministic confidence
  *  already computed for this event. */
 export async function classifyAndGrade(input: ClassifierInput, deterministicConfidence: "HIGH" | "MEDIUM" | "LOW"): Promise<AiAdvisoryDecision> {
-  if (deterministicConfidence === "HIGH") return { action: "IGNORE", output: null }; // never even call the provider — nothing to gain
+  if (deterministicConfidence === "HIGH") {
+    logAiEvent("SKIPPED_HIGH_CONFIDENCE");
+    return { action: "IGNORE", output: null }; // never even call the provider — nothing to gain, and §8/§9 cost control
+  }
   const output = await classifyAdvisory(input);
-  return gradeAiOutput(output, deterministicConfidence);
+  const decision = gradeAiOutput(output, deterministicConfidence);
+  if (output) {
+    logAiEvent(
+      decision.action === "ALLOW_AUTOMATIC" ? "SUGGESTION_ACCEPTED" : decision.action === "SUGGEST" ? "SUGGESTION_SURFACED" : "SUGGESTION_REJECTED",
+      { action: decision.action, confidence: output.confidence },
+    );
+  }
+  return decision;
 }

@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.120.0",
     "@direct-banking/shared": "workspace:*",
     "@prisma/client": "^5.22.0",
     "cookie-parser": "^1.4.7",

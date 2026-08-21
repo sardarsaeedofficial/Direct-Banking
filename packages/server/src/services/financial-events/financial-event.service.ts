@@ -54,11 +54,14 @@ async function resolveCreditCardRepaymentPayee(
 async function resolveInternalTransferCandidate(
   userId: string,
   ctx: { counterpartyText: string | null; ownAccountId: string; client: Prisma.TransactionClient },
-): Promise<{ accountId: string; reasons: string[] } | null> {
+): Promise<{ accountId: string; reasons: string[]; highConfidence: boolean } | null> {
   if (!ctx.counterpartyText) return null;
   const match = await resolveOwnedAccount({ userId, counterpartyText: ctx.counterpartyText, client: ctx.client });
   if (!match.accountId || match.accountId === ctx.ownAccountId) return null;
-  return { accountId: match.accountId, reasons: [...match.reasons, "ACCOUNT_IDENTITY_POSSIBLE_TRANSFER"] };
+  // highConfidence: a previously user-confirmed (or system-learned) mapping
+  // — genuinely strong evidence, unlike the weak name-similarity tier this
+  // function also accepts (which only ever produces a REVIEW hint downstream).
+  return { accountId: match.accountId, reasons: [...match.reasons, "ACCOUNT_IDENTITY_POSSIBLE_TRANSFER"], highConfidence: match.confidence === "HIGH" };
 }
 
 // ---------------------------------------------------------------------------
@@ -397,6 +400,11 @@ export async function ingestFinancialEvent(
   // input.accountId when the FinancialEvent/Transaction rows are written.
   let resolvedCounterpartyAccountId: string | null = null;
   let internalTransferCandidate = false;
+  // Cost control (§8/§9): a HIGH-confidence account-identity resolution — an
+  // exact credit-card payee match, or a previously user-confirmed/system-
+  // learned counterparty mapping — is already decisive evidence. Calling the
+  // AI on top of it would spend a request re-deciding something already known.
+  let strongAccountEvidence = false;
   const reasons: string[] = classified.reasonCode ? [classified.reasonCode] : [];
   // Structured sender/recipient fields (when the caller supplied them — e.g.
   // "SARDAR SAEED" for a bank-transfer-style notification) are a more
@@ -413,6 +421,7 @@ export async function ingestFinancialEvent(
       resolvedCounterpartyAccountId = ccMatch.toAccountId;
       reasons.push(...ccMatch.reasons);
       if (!effectivePaymentRail && looksLikeDirectDebit(input.redactedText)) effectivePaymentRail = "DIRECT_DEBIT";
+      strongAccountEvidence = true; // resolveCreditCardRepaymentPayee only ever returns non-null at HIGH resolver confidence
     }
   }
   if (effectiveEventKind !== "CREDIT_CARD_REPAYMENT" && (classified.expectedDirection === "INCOME" || classified.expectedDirection === "EXPENSE")) {
@@ -421,6 +430,7 @@ export async function ingestFinancialEvent(
       internalTransferCandidate = true;
       resolvedCounterpartyAccountId = transferMatch.accountId;
       reasons.push(...transferMatch.reasons);
+      if (transferMatch.highConfidence) strongAccountEvidence = true;
     }
   }
   // Direction-aware from/to: EXPENSE means money leaves input.accountId
@@ -431,11 +441,14 @@ export async function ingestFinancialEvent(
   const toAccountId = classified.expectedDirection === "INCOME" ? input.accountId : resolvedCounterpartyAccountId;
 
   // AI advisory refinement — ONLY when deterministic confidence isn't
-  // already HIGH, and ONLY ever allowed to refine eventKind/paymentRail
-  // (still validated by the exact same downstream posting policy as any
-  // deterministic classification) — never an account id, never lifecycle,
-  // never amount/direction. See services/transaction-ai/advisory.ts.
-  if (classified.confidenceLevel !== "HIGH" && classified.isFinancial) {
+  // already HIGH AND account-identity resolution didn't already settle it
+  // (§8/§9 cost control: never spend a call re-deciding a known exact
+  // mapping or a high-confidence payee match), and ONLY ever allowed to
+  // refine eventKind/paymentRail (still validated by the exact same
+  // downstream posting policy as any deterministic classification) — never
+  // an account id, never lifecycle, never amount/direction. See
+  // services/transaction-ai/advisory.ts.
+  if (classified.confidenceLevel !== "HIGH" && !strongAccountEvidence && classified.isFinancial) {
     const aiInput: ClassifierInput = {
       sourceInstitution: input.senderBankName ?? input.recipientBankName ?? null,
       sourcePackage: input.sourcePackage,
