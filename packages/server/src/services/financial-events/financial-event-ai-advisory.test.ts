@@ -18,6 +18,8 @@ let ingestFinancialEvent: any;
 let setClassifierForTests: any;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let FakeSemanticClassifier: any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let confirmCounterpartyAccount: any;
 
 beforeAll(async () => {
   const dbUrl = process.env.MOBILE_TEST_DATABASE_URL;
@@ -33,6 +35,7 @@ beforeAll(async () => {
     const registry = await import("../transaction-ai/registry.js");
     setClassifierForTests = registry.setClassifierForTests;
     FakeSemanticClassifier = (await import("../transaction-ai/fake-classifier.js")).FakeSemanticClassifier;
+    confirmCounterpartyAccount = (await import("../account-resolution/account-identity-resolver.js")).confirmCounterpartyAccount;
     ready = true;
   } catch {
     ready = false;
@@ -51,9 +54,13 @@ async function newUser(tag: string) {
   return user.id as string;
 }
 
-async function newAccount(userId: string, over: Partial<{ bankName: string; accountType: string; balanceMinor: bigint }> = {}) {
+async function newAccount(userId: string, over: Partial<{ bankName: string; accountType: string; balanceMinor: bigint; balanceAuthority: string }> = {}) {
   const acc = await prisma.bankAccount.create({
-    data: { userId, bankName: over.bankName ?? "Test Bank", nickname: over.bankName ?? "Test Bank", accountType: (over.accountType as never) ?? "CURRENT", currency: "GBP", balanceMinor: over.balanceMinor ?? 0n },
+    data: {
+      userId, bankName: over.bankName ?? "Test Bank", nickname: over.bankName ?? "Test Bank",
+      accountType: (over.accountType as never) ?? "CURRENT", currency: "GBP", balanceMinor: over.balanceMinor ?? 0n,
+      balanceAuthority: (over.balanceAuthority as never) ?? "LEDGER",
+    },
   });
   return acc.id as string;
 }
@@ -271,5 +278,131 @@ describe("AI advisory — end-to-end §10 observed cases", () => {
     });
     expect(result.event).toBeTruthy();
     expect(result.event.amountMinor).toBe(500);
+  });
+
+  it("Scenario G — PROVIDER-authoritative account/balance evidence always wins over the AI, and the AI is never even asked", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const userId = await newUser("provider-authority");
+    const spendingAcc = await newAccount(userId);
+    // An Open-Banking-connected credit card: the CONNECTED PROVIDER, not this
+    // app's local ledger, is authoritative for its balance (see
+    // BalanceAuthority in schema.prisma) — the same "provider evidence always
+    // wins" rule that governs deterministic-vs-AI classification also governs
+    // account/balance authority. A unique CREDIT_CARD account matching the
+    // payee name is HIGH-confidence account-identity evidence, which by
+    // itself is already enough to skip the AI entirely (§8/§9 cost control).
+    const cardAcc = await newAccount(userId, { bankName: "Zable", accountType: "CREDIT_CARD", balanceAuthority: "PROVIDER", balanceMinor: -50000n });
+    const fake = new FakeSemanticClassifier();
+    // A maximally "confident" AI opinion that, if it were ever consulted,
+    // would try to redirect this to a completely different classification —
+    // it must never be reached at all, let alone win.
+    fake.response = baseAiOutput({ eventKind: "CARD_PURCHASE", analyticsRole: "SPENDING", isLikelyCreditCardRepayment: false, confidence: 0.99 });
+    setClassifierForTests(fake);
+
+    const result = await ingestFinancialEvent(userId, {
+      accountId: spendingAcc, sourcePackage: "unknown.zable", sourceFingerprint: `fp-${Date.now()}-11`, trustedSource: false,
+      title: "Zable", redactedText: "Payment to Zable Card has left your account", // generic wording, no "repayment" keyword
+      clientDirection: "EXPENSE", clientAmountMinor: 12000, clientConfidence: 0.65, // deliberately MEDIUM — would normally trigger AI consultation
+      occurredAt: new Date(),
+    });
+
+    // Strong account-identity evidence (HIGH-confidence payee match) reclassifies
+    // this as a credit-card repayment on its own — the AI's contradicting
+    // opinion is never applied, and is never even requested.
+    expect(result.event.eventKind).toBe("CREDIT_CARD_REPAYMENT");
+    expect(fake.calls.length).toBe(0);
+    // The resolved destination account's PROVIDER-authoritative balance is
+    // never locally decremented by this app's own ledger posting, regardless
+    // of what the (never-called) AI would have suggested.
+    const cardAfter = await prisma.bankAccount.findUnique({ where: { id: cardAcc } });
+    expect(cardAfter).toMatchObject({ balanceMinor: -50000n });
+  });
+});
+
+describe("AI advisory — explicit cost-control skip scenarios (§6/§9)", () => {
+  it("a user-confirmed CounterpartyAccountMapping resolves the account and skips the AI entirely", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const userId = await newUser("mapping-skip");
+    const spendingAcc = await newAccount(userId);
+    const mappedAcc = await newAccount(userId, { bankName: "Mapped Savings" });
+    await confirmCounterpartyAccount(userId, "Mapped Savings", mappedAcc, "USER");
+
+    const fake = new FakeSemanticClassifier();
+    fake.response = baseAiOutput({ eventKind: "CARD_PURCHASE", confidence: 0.99 }); // would apply if consulted — must never be
+    setClassifierForTests(fake);
+
+    const result = await ingestFinancialEvent(userId, {
+      accountId: spendingAcc, sourcePackage: "unknown.somebank", sourceFingerprint: `fp-${Date.now()}-mapping`, trustedSource: false,
+      title: "Mapped Savings", redactedText: "Money sent to Mapped Savings", // generic wording, no strong text signal
+      clientDirection: "EXPENSE", clientAmountMinor: 4000, clientConfidence: 0.65, // deliberately MEDIUM
+      occurredAt: new Date(),
+    });
+    // The stored mapping is HIGH-confidence account-identity evidence on its
+    // own — strongAccountEvidence short-circuits the AI consultation before
+    // it would otherwise have been reached at MEDIUM deterministic confidence.
+    expect(fake.calls.length).toBe(0);
+    expect(result.event).toBeTruthy();
+  });
+
+  it("a known Direct-Debit-worded, HIGH-confidence notification skips the AI (the general HIGH-confidence cost-control gate)", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const userId = await newUser("dd-skip");
+    const acc = await newAccount(userId);
+    const fake = new FakeSemanticClassifier();
+    fake.response = baseAiOutput({ eventKind: "CREDIT_CARD_REPAYMENT", confidence: 0.99 });
+    setClassifierForTests(fake);
+
+    const result = await ingestFinancialEvent(userId, {
+      accountId: acc, sourcePackage: "unknown.somebank", sourceFingerprint: `fp-${Date.now()}-dd`, trustedSource: false,
+      title: "Acme Utilities", redactedText: "Your Direct Debit payment to Acme Utilities has been collected",
+      clientDirection: "EXPENSE", clientAmountMinor: 3000, clientConfidence: 0.95, // HIGH
+      occurredAt: new Date(),
+    });
+    expect(fake.calls.length).toBe(0);
+    expect(result.event.eventKind).not.toBe("CREDIT_CARD_REPAYMENT"); // the never-called AI's opinion is not applied
+  });
+
+  it("a duplicate notification (same sourceFingerprint) never re-consults the AI on the repeat ingest", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const userId = await newUser("dup-skip");
+    const acc = await newAccount(userId);
+    const fingerprint = `fp-${Date.now()}-dup`;
+    const fake = new FakeSemanticClassifier();
+    fake.response = baseAiOutput({ eventKind: "CARD_PURCHASE", confidence: 0.9 });
+    setClassifierForTests(fake);
+
+    const notif = {
+      accountId: acc, sourcePackage: "unknown.somebank", sourceFingerprint: fingerprint, trustedSource: false,
+      title: "Some Shop", redactedText: "Payment to Some Shop, no strong signal either way",
+      clientDirection: "EXPENSE" as const, clientAmountMinor: 1500, clientConfidence: 0.65, // MEDIUM -> AI consulted once
+      occurredAt: new Date(),
+    };
+    await ingestFinancialEvent(userId, notif);
+    const callsAfterFirst = fake.calls.length;
+    expect(callsAfterFirst).toBeGreaterThan(0); // sanity: this scenario genuinely does consult the AI the first time
+
+    const second = await ingestFinancialEvent(userId, notif);
+    expect(second.duplicate).toBe(true);
+    // Duplicate detection returns before classification/AI is ever reached
+    // again — no additional call was made for the repeat ingest.
+    expect(fake.calls.length).toBe(callsAfterFirst);
+  });
+
+  it("a non-financial notification never consults the AI at all", async (ctx) => {
+    if (!ready) return ctx.skip();
+    const userId = await newUser("nonfin-skip");
+    const acc = await newAccount(userId);
+    const fake = new FakeSemanticClassifier();
+    fake.response = baseAiOutput({ eventKind: "CARD_PURCHASE", confidence: 0.9 });
+    setClassifierForTests(fake);
+
+    const result = await ingestFinancialEvent(userId, {
+      accountId: acc, sourcePackage: "unknown.somebank", sourceFingerprint: `fp-${Date.now()}-nonfin`, trustedSource: false,
+      title: "Your Bank", redactedText: "Your statement is ready to view", // matches NON_FINANCIAL_RE in classifier.ts
+      clientDirection: null, clientAmountMinor: null, clientConfidence: 0.1,
+      occurredAt: new Date(),
+    });
+    expect(result.event.eventKind).toBe("NON_FINANCIAL");
+    expect(fake.calls.length).toBe(0);
   });
 });

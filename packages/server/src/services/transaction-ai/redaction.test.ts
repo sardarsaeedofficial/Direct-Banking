@@ -13,6 +13,18 @@ describe("redactForAi", () => {
     expect(redactForAi("Sort code 12-34-56")).toContain("[sort-code-redacted]");
   });
 
+  it("redacts a bare UK bank account number", () => {
+    const out = redactForAi("Paid to account 12345678");
+    expect(out).not.toContain("12345678");
+    expect(out).toContain("[account-number-redacted]");
+  });
+
+  it("redacts an IBAN", () => {
+    const out = redactForAi("IBAN GB29NWBK60161331926819 on file");
+    expect(out).not.toContain("GB29NWBK60161331926819");
+    expect(out).toContain("[iban-redacted]");
+  });
+
   it("redacts an email address", () => {
     expect(redactForAi("Contact user@example.com for help")).toContain("[email-redacted]");
   });
@@ -54,5 +66,20 @@ describe("assertNoForbiddenFields", () => {
 
   it("is case-insensitive", () => {
     expect(() => assertNoForbiddenFields({ AccessToken: "xyz" })).toThrow();
+  });
+
+  it("throws if DATABASE_URL is present under any casing", () => {
+    expect(() => assertNoForbiddenFields({ DATABASE_URL: "postgres://..." })).toThrow();
+    expect(() => assertNoForbiddenFields({ databaseUrl: "postgres://..." })).toThrow();
+  });
+
+  it("throws if the AI provider's own API key is present under any common spelling", () => {
+    expect(() => assertNoForbiddenFields({ apiKey: "sk-ant-secret" })).toThrow();
+    expect(() => assertNoForbiddenFields({ TRANSACTION_AI_API_KEY: "sk-ant-secret" })).toThrow();
+    expect(() => assertNoForbiddenFields({ anthropicApiKey: "sk-ant-secret" })).toThrow();
+  });
+
+  it("throws if a password field is present", () => {
+    expect(() => assertNoForbiddenFields({ password: "hunter2" })).toThrow();
   });
 });

@@ -24,18 +24,36 @@ export interface AiAdvisoryDecision {
 }
 
 // ---------------------------------------------------------------------------
-// Observability (§7) — safe operational events only. Never logs the prompt,
+// Observability (§9) — safe operational events only. Never logs the prompt,
 // the raw response, an API key, or any redacted-but-still-sensitive field —
 // only the provider name, a numeric confidence, and an outcome/action label.
+// Provider-agnostic: rate-limit detection below duck-types a `.status`/
+// `.statusCode` field (which every mainstream HTTP client's error, including
+// Anthropic's APIError, exposes) rather than importing a specific SDK's
+// exception classes here — this module must never be coupled to one provider.
 // ---------------------------------------------------------------------------
 
-type AiObservabilityEvent =
-  | "REQUESTED" | "SKIPPED_HIGH_CONFIDENCE" | "SUCCEEDED" | "TIMED_OUT"
-  | "MALFORMED_RESPONSE" | "PROVIDER_ERROR" | "SUGGESTION_ACCEPTED"
-  | "SUGGESTION_SURFACED" | "SUGGESTION_REJECTED";
+export type AiObservabilityEvent =
+  | "AI_REQUESTED" | "AI_SKIPPED_HIGH_DETERMINISTIC_CONFIDENCE" | "AI_SKIPPED_USER_MAPPING"
+  | "AI_SUCCESS" | "AI_TIMEOUT" | "AI_RATE_LIMIT" | "AI_PROVIDER_ERROR" | "AI_INVALID_RESPONSE"
+  | "AI_SUGGESTION_ACCEPTED" | "AI_SUGGESTION_SURFACED" | "AI_SUGGESTION_REJECTED";
 
 function logAiEvent(event: AiObservabilityEvent, meta?: { provider?: string; confidence?: number; action?: AiAdvisoryAction }): void {
-  logger.info(`transaction-ai.${event}`, meta);
+  logger.info(event, meta);
+}
+
+/** Exported so callers that skip the AI for a reason THEY decided (e.g.
+ *  financial-event.service.ts finding strong account-identity evidence, or
+ *  a user-confirmed CounterpartyAccountMapping) still emit a real, safe
+ *  observability event — the AI was never even asked, so classifyAdvisory()
+ *  itself never runs and can't log it. */
+export function logAiSkippedForStrongEvidence(): void {
+  logAiEvent("AI_SKIPPED_USER_MAPPING");
+}
+
+function isRateLimitError(err: unknown): boolean {
+  const status = (err as { status?: unknown; statusCode?: unknown } | null)?.status ?? (err as { statusCode?: unknown } | null)?.statusCode;
+  return status === 429;
 }
 
 /**
@@ -73,7 +91,7 @@ export function gradeAiOutput(output: ClassifierOutput | null, deterministicConf
 export async function classifyAdvisory(input: ClassifierInput): Promise<ClassifierOutput | null> {
   if (!transactionAiEnabled()) return null; // the expected default path — not logged; logging every ingestion while AI is off is noise, not observability
   const classifier = getClassifier();
-  logAiEvent("REQUESTED", { provider: classifier.name });
+  logAiEvent("AI_REQUESTED", { provider: classifier.name });
 
   let raced: unknown;
   try {
@@ -85,27 +103,27 @@ export async function classifyAdvisory(input: ClassifierInput): Promise<Classifi
         (t as unknown as { unref?: () => void }).unref?.();
       }),
     ]);
-  } catch {
+  } catch (err) {
     // Provider error (HTTP error, rate limit, network failure, thrown
     // exception) — advisory only, never propagated to the caller. Never
-    // logs the caught error itself: it may embed request/response detail
-    // from an HTTP client that this module has no way to guarantee is
-    // secret-free.
-    logAiEvent("PROVIDER_ERROR", { provider: classifier.name });
+    // logs the caught error's message/body: it may embed request/response
+    // detail from an HTTP client that this module has no way to guarantee
+    // is secret-free — only whether it looked like a 429, safe to know.
+    logAiEvent(isRateLimitError(err) ? "AI_RATE_LIMIT" : "AI_PROVIDER_ERROR", { provider: classifier.name });
     return null;
   }
   if (raced === TIMEOUT) {
-    logAiEvent("TIMED_OUT", { provider: classifier.name });
+    logAiEvent("AI_TIMEOUT", { provider: classifier.name });
     return null;
   }
   if (raced == null) return null; // classifier had no opinion — not an error
 
   const parsed = parseClassifierOutput(raced);
   if (!parsed) {
-    logAiEvent("MALFORMED_RESPONSE", { provider: classifier.name });
+    logAiEvent("AI_INVALID_RESPONSE", { provider: classifier.name });
     return null;
   }
-  logAiEvent("SUCCEEDED", { provider: classifier.name, confidence: parsed.confidence });
+  logAiEvent("AI_SUCCESS", { provider: classifier.name, confidence: parsed.confidence });
   return parsed;
 }
 
@@ -113,14 +131,14 @@ export async function classifyAdvisory(input: ClassifierInput): Promise<Classifi
  *  already computed for this event. */
 export async function classifyAndGrade(input: ClassifierInput, deterministicConfidence: "HIGH" | "MEDIUM" | "LOW"): Promise<AiAdvisoryDecision> {
   if (deterministicConfidence === "HIGH") {
-    logAiEvent("SKIPPED_HIGH_CONFIDENCE");
+    logAiEvent("AI_SKIPPED_HIGH_DETERMINISTIC_CONFIDENCE");
     return { action: "IGNORE", output: null }; // never even call the provider — nothing to gain, and §8/§9 cost control
   }
   const output = await classifyAdvisory(input);
   const decision = gradeAiOutput(output, deterministicConfidence);
   if (output) {
     logAiEvent(
-      decision.action === "ALLOW_AUTOMATIC" ? "SUGGESTION_ACCEPTED" : decision.action === "SUGGEST" ? "SUGGESTION_SURFACED" : "SUGGESTION_REJECTED",
+      decision.action === "ALLOW_AUTOMATIC" ? "AI_SUGGESTION_ACCEPTED" : decision.action === "SUGGEST" ? "AI_SUGGESTION_SURFACED" : "AI_SUGGESTION_REJECTED",
       { action: decision.action, confidence: output.confidence },
     );
   }

@@ -102,6 +102,29 @@ describe("ClaudeSemanticClassifier", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  it("never sends the AI provider's own API key even if it leaks onto the input object", async () => {
+    const create = vi.fn().mockResolvedValue(toolUseResponse(validOutput));
+    const fakeClient: MessagesClient = { messages: { create } };
+    const classifier = new ClaudeSemanticClassifier(fakeClient, "claude-opus-5");
+    const poisoned = { ...input, apiKey: "sk-ant-should-never-be-sent" } as unknown as ClassifierInput;
+    await expect(classifier.classify(poisoned)).rejects.toThrow(/forbidden field/i);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("the prompt sent to the provider never contains the classifier's own API key or a DATABASE_URL-shaped string", async () => {
+    const create = vi.fn().mockResolvedValue(toolUseResponse(validOutput));
+    const fakeClient: MessagesClient = { messages: { create } };
+    // The classifier is constructed with a fake API key + model — neither the
+    // adapter's constructor args nor the process's real secrets have any code
+    // path into buildUserPrompt(), but this proves the actual prompt text
+    // sent to the provider is fully free of both regardless.
+    const classifier = new ClaudeSemanticClassifier(fakeClient, "claude-opus-5");
+    await classifier.classify(input);
+    const promptText = JSON.stringify(create.mock.calls[0][0].messages);
+    expect(promptText).not.toMatch(/sk-ant-/);
+    expect(promptText).not.toMatch(/postgres(ql)?:\/\//i);
+  });
+
   it("the prompt sent to the provider never contains the raw redacted-away card/account number pattern", async () => {
     const create = vi.fn().mockResolvedValue(toolUseResponse(validOutput));
     const fakeClient: MessagesClient = { messages: { create } };

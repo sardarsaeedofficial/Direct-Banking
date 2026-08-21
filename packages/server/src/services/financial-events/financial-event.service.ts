@@ -7,8 +7,9 @@ import { detectAndPairInternalTransfer } from "../internal-transfer.service.js";
 import { detectDirectDebit, normaliseCompany, looksLikeDirectDebit, recomputeMandate } from "../direct-debit.service.js";
 import { resolveOwnedAccount } from "../account-resolution/account-identity-resolver.js";
 import { analyticsRoleFor } from "../transaction-ai/analytics-role.js";
-import { classifyAndGrade } from "../transaction-ai/advisory.js";
+import { classifyAndGrade, logAiSkippedForStrongEvidence } from "../transaction-ai/advisory.js";
 import { redactForAi } from "../transaction-ai/redaction.js";
+import { aiReasonCodes } from "../transaction-ai/explainability.js";
 import type { ClassifierInput } from "../transaction-ai/types.js";
 
 // ---------------------------------------------------------------------------
@@ -448,6 +449,13 @@ export async function ingestFinancialEvent(
   // downstream posting policy as any deterministic classification) — never
   // an account id, never lifecycle, never amount/direction. See
   // services/transaction-ai/advisory.ts.
+  if (classified.confidenceLevel !== "HIGH" && strongAccountEvidence && classified.isFinancial) {
+    // AI would otherwise have been consulted (deterministic confidence isn't
+    // HIGH) but a strong account-identity resolution already settled it —
+    // record the safe, provider-agnostic skip event instead of silently
+    // skipping (§9 observability: every cost-control skip is visible).
+    logAiSkippedForStrongEvidence();
+  }
   if (classified.confidenceLevel !== "HIGH" && !strongAccountEvidence && classified.isFinancial) {
     const aiInput: ClassifierInput = {
       sourceInstitution: input.senderBankName ?? input.recipientBankName ?? null,
@@ -464,7 +472,10 @@ export async function ingestFinancialEvent(
     };
     const decision = await classifyAndGrade(aiInput, classified.confidenceLevel);
     if (decision.output) {
-      reasons.push(`AI_SUGGESTION_${decision.action}`, ...decision.output.reasons.map((r) => `AI:${r}`));
+      // App-owned reason codes ONLY (aiReasonCodes reads the AI's structured
+      // booleans/enums) — the model's own free-text `reasons` array is
+      // deliberately never read here, never persisted, never displayed.
+      reasons.push(`AI_SUGGESTION_${decision.action}`, ...aiReasonCodes(decision.output));
       if (decision.action === "ALLOW_AUTOMATIC") {
         effectiveEventKind = decision.output.eventKind;
         if (decision.output.paymentRail) effectivePaymentRail = decision.output.paymentRail;
