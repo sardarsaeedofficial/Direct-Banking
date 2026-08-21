@@ -356,6 +356,16 @@ export const txnCorrectionSchema = z
   .refine((v) => Object.keys(v).length > 0, { message: "No changes supplied" });
 export type TxnCorrectionInput = z.infer<typeof txnCorrectionSchema>;
 
+// Transaction Intelligence Engine: the user confirms which owned account a
+// recurring counterparty ("Zable Card") actually belongs to. Persisted as a
+// CounterpartyAccountMapping so future notifications from the same
+// counterparty resolve deterministically without asking again.
+export const confirmCounterpartyAccountSchema = z.object({
+  counterpartyText: z.string().min(1).max(160),
+  accountId: cuid,
+});
+export type ConfirmCounterpartyAccountInput = z.infer<typeof confirmCounterpartyAccountSchema>;
+
 // Phase 2 — edit a Direct Debit mandate. User overrides take precedence over
 // learned predictions; every field is optional.
 export const ddUpdateSchema = z

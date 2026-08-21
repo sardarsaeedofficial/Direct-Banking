@@ -57,6 +57,20 @@ const schema = z.object({
   PLAID_CLIENT_ID: z.string().optional(),
   PLAID_SECRET: z.string().optional(),
   PLAID_WEBHOOK_URI: z.string().optional(),
+  // ---- Transaction Intelligence Engine: AI semantic classifier (advisory only) ----
+  // Disabled by default — the deterministic engine (classifier + account
+  // resolver + Direct Debit/internal-transfer/liability logic) is fully
+  // functional with this off; the AI layer is a purely additive, optional
+  // confidence booster for cases deterministic evidence alone can't resolve.
+  // See services/transaction-ai/ — the AI can never post/mutate the ledger
+  // directly regardless of this flag (see ledger-posting-policy.ts).
+  TRANSACTION_AI_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
+  TRANSACTION_AI_PROVIDER: z.string().optional(),
+  TRANSACTION_AI_MODEL: z.string().optional(),
+  TRANSACTION_AI_API_KEY: z.string().optional(),
 });
 
 const parsed = schema.safeParse(process.env);

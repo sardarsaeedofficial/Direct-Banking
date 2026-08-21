@@ -20,7 +20,9 @@ import { validate, validated } from "../middleware/validate.js";
 import { asyncHandler, HttpError } from "../middleware/error.js";
 import { authLimiter } from "../middleware/rateLimit.js";
 import { createTransaction, defaultTypeFor } from "../services/transactions.service.js";
-import { detectAndPairInternalTransfer } from "../services/internal-transfer.service.js";
+import { detectAndPairInternalTransfer, reconcileUnmatchedTransfers } from "../services/internal-transfer.service.js";
+import { confirmCounterpartyAccount } from "../services/account-resolution/account-identity-resolver.js";
+import { recordCorrection } from "../services/corrections.service.js";
 import {
   detectDirectDebit,
   effectiveExpectation,
@@ -28,8 +30,8 @@ import {
   normaliseCompany,
   recomputeMandate,
 } from "../services/direct-debit.service.js";
-import { ingestFinancialEvent } from "../services/financial-events/financial-event.service.js";
-import { findSuspiciousLegacyTransactions, applyHistoricalCorrection } from "../services/financial-events/historical-review.service.js";
+import { ingestFinancialEvent, linkCreditCardRepaymentToMandate } from "../services/financial-events/financial-event.service.js";
+import { findSuspiciousLegacyTransactions, applyHistoricalCorrection, findSuspiciousEconomicPurpose, findRepaymentsMissingMandate } from "../services/financial-events/historical-review.service.js";
 import { KNOWN_BANKS } from "../services/notification-import.service.js";
 import { getDashboard } from "../services/dashboard.service.js";
 import { registerUser, deleteUserAccount, DeleteAccountError } from "../services/users.service.js";
@@ -46,6 +48,7 @@ import {
   txnCorrectionSchema, ddUpdateSchema, ddMergeSchema,
   budgetSchema, budgetUpdateSchema, categorySchema,
   categoryRuleSchema, categoryRuleUpdateSchema, recurringPaymentPatchSchema,
+  confirmCounterpartyAccountSchema,
 } from "@direct-banking/shared";
 import {
   startConnection,
@@ -354,6 +357,21 @@ mobileRouter.patch(
       data.recurringKind = "DIRECT_DEBIT";
     }
 
+    // Transaction Intelligence Engine: keep a manual reclassification's
+    // credit-card liability effect consistent with the automatic path
+    // (financial-event.service.ts) — idempotent (reverses the OLD linked
+    // account's adjustment before applying any NEW one, so repeated edits
+    // never double-adjust). recipientAccountId is only ever set for an
+    // EXPENSE (the direction a repayment/single-sided-transfer link uses).
+    const wasRepayment = txn.transactionType === "CREDIT_CARD_REPAYMENT" && txn.direction === "EXPENSE" ? txn.recipientAccountId : null;
+    const willBeType = data.transactionType !== undefined ? data.transactionType : txn.transactionType;
+    const willBeRecipient = data.recipientAccountId !== undefined ? (data.recipientAccountId as string | null) : txn.recipientAccountId;
+    const willBeRepayment = willBeType === "CREDIT_CARD_REPAYMENT" && txn.direction === "EXPENSE" ? willBeRecipient : null;
+    if (wasRepayment !== willBeRepayment) {
+      if (wasRepayment) await prisma.bankAccount.updateMany({ where: { id: wasRepayment, userId, balanceAuthority: { not: "PROVIDER" } }, data: { balanceMinor: { increment: txn.amountMinor } } });
+      if (willBeRepayment) await prisma.bankAccount.updateMany({ where: { id: willBeRepayment, userId, balanceAuthority: { not: "PROVIDER" } }, data: { balanceMinor: { decrement: txn.amountMinor } } });
+    }
+
     const updated = await prisma.transaction.update({
       where: { id: txn.id },
       data,
@@ -366,6 +384,29 @@ mobileRouter.patch(
     // rows are never rewritten — only future categorisation changes.
     if (body.categoryId !== undefined && txn.merchantId) {
       await teachMerchantCategory(userId, txn.merchantId, body.categoryId ?? null);
+    }
+    // Transaction Intelligence Engine: a user linking this transaction to one
+    // of their own accounts (internal-transfer counterpart or credit-card
+    // repayment destination) teaches the counterparty text -> account
+    // mapping, so future notifications from the same counterparty resolve
+    // automatically. Never overwrites a mapping with weaker/no evidence —
+    // confirmCounterpartyAccount() is only ever called with an explicit id here.
+    if (body.counterpartyAccountId && (txn.merchantName || txn.senderName || txn.recipientName)) {
+      const counterpartyText = txn.merchantName ?? (txn.direction === "INCOME" ? txn.senderName : txn.recipientName);
+      if (counterpartyText) await confirmCounterpartyAccount(userId, counterpartyText, body.counterpartyAccountId, "USER");
+    }
+    // Audit trail scoped to this round's new capability: a manual economic-
+    // purpose reclassification into/out of CREDIT_CARD_REPAYMENT. The other
+    // correction kinds this route already handled before this round
+    // (category, DD marking, internal-transfer marking, notes, etc.) are
+    // unchanged — not newly mislabelled under a generic action here.
+    if (willBeRepayment !== wasRepayment && (willBeType === "CREDIT_CARD_REPAYMENT" || txn.transactionType === "CREDIT_CARD_REPAYMENT")) {
+      await recordCorrection(userId, {
+        transactionId: txn.id,
+        action: "RECLASSIFY_EVENT_KIND",
+        before: { transactionType: txn.transactionType, recipientAccountId: wasRepayment },
+        after: { transactionType: updated.transactionType, recipientAccountId: willBeRepayment },
+      });
     }
     res.json({ transaction: updated });
   }),
@@ -1087,6 +1128,49 @@ mobileRouter.post(
   asyncHandler(async (req, res) => {
     const result = await applyHistoricalCorrection(req.mobileAuth!.userId, req.params.transactionId);
     res.json({ corrected: true, ...result });
+  }),
+);
+
+// Transaction Intelligence Engine (§15): identify EXISTING transactions
+// whose ECONOMIC PURPOSE would now resolve differently under
+// account-identity-aware classification (a Zable-style repayment still
+// posted as Purchase; a same-user transfer still sitting as Income).
+// Read-only — apply a confirmed correction via the existing
+// PATCH /transactions/:id (transactionType + counterpartyAccountId).
+mobileRouter.get(
+  "/financial-intelligence/purpose-review",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    res.json({ items: await findSuspiciousEconomicPurpose(req.mobileAuth!.userId) });
+  }),
+);
+
+// §15 "DD repayment missing mandate association" — read-only.
+mobileRouter.get(
+  "/financial-intelligence/mandate-gaps",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    res.json({ items: await findRepaymentsMissingMandate(req.mobileAuth!.userId) });
+  }),
+);
+
+// Attach an existing CREDIT_CARD_REPAYMENT transaction to its company's DD
+// mandate — deliberately its own tiny endpoint rather than reusing PATCH
+// /transactions/:id's markDirectDebit path, which always sets
+// transactionType="DIRECT_DEBIT" and would silently undo the repayment
+// classification this whole round exists to fix (see
+// linkCreditCardRepaymentToMandate()'s own doc comment).
+mobileRouter.post(
+  "/transactions/:id/link-mandate",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const txn = await prisma.transaction.findFirst({ where: { id: req.params.id, userId } });
+    if (!txn) throw new HttpError(404, "Transaction not found");
+    if (txn.transactionType !== "CREDIT_CARD_REPAYMENT") throw new HttpError(400, "Only a credit-card repayment can be linked this way");
+    const mandateId = await linkCreditCardRepaymentToMandate(userId, { transactionId: txn.id, accountId: txn.accountId, merchantName: txn.merchantName, amountMinor: Number(txn.amountMinor), bookedAt: txn.bookedAt });
+    if (!mandateId) throw new HttpError(404, "No existing mandate found for this payee on this account");
+    res.json({ transactionId: txn.id, mandateId });
   }),
 );
 
@@ -1953,6 +2037,38 @@ mobileRouter.post(
       if (e instanceof TransferPairError) throw new HttpError(400, e.message);
       throw e;
     }
+  }),
+);
+
+// Transaction Intelligence Engine (§9): re-attempt internal-transfer pairing
+// for currently-unpaired transactions — the safety net for "the matching
+// debit hadn't arrived yet" (Real Case 2). Safe to call repeatedly; only
+// ever upgrades/confirms a match, never fabricates one.
+mobileRouter.post(
+  "/internal-transfers/reconcile",
+  requireMobileAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const days = Math.min(Math.max(Number(req.body?.windowDays) || 30, 1), 180);
+    res.json(await reconcileUnmatchedTransfers(userId, days));
+  }),
+);
+
+// Transaction Intelligence Engine (§9): the user confirms which owned
+// account a recurring counterparty belongs to ("Zable Card is my Zable
+// credit-card account"). Persisted so future notifications from the same
+// counterparty resolve deterministically — see AccountIdentityResolver.
+mobileRouter.post(
+  "/counterparty-mappings",
+  requireMobileAuth,
+  validate(confirmCounterpartyAccountSchema),
+  asyncHandler(async (req, res) => {
+    const userId = req.mobileAuth!.userId;
+    const body = validated<typeof confirmCounterpartyAccountSchema>(res);
+    const mapping = await confirmCounterpartyAccount(userId, body.counterpartyText, body.accountId, "USER");
+    if (!mapping) throw new HttpError(404, "Account not found");
+    await recordCorrection(userId, { action: "CONFIRM_COUNTERPARTY_ACCOUNT", before: { counterpartyKey: mapping.counterpartyKey }, after: { accountId: mapping.accountId } });
+    res.status(201).json(mapping);
   }),
 );
 

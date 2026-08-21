@@ -1,10 +1,65 @@
 import type { Prisma, FinancialEvent, TxnDirection } from "@prisma/client";
 import { prisma } from "../../db.js";
-import { classifyNotification, type ClientDirection } from "./classifier.js";
+import { classifyNotification, type ClientDirection, type FinEventKind, type PaymentRail } from "./classifier.js";
 import { decidePosting, canTransition } from "./ledger-posting-policy.js";
 import { createTransaction } from "../transactions.service.js";
 import { detectAndPairInternalTransfer } from "../internal-transfer.service.js";
-import { detectDirectDebit, normaliseCompany } from "../direct-debit.service.js";
+import { detectDirectDebit, normaliseCompany, looksLikeDirectDebit, recomputeMandate } from "../direct-debit.service.js";
+import { resolveOwnedAccount } from "../account-resolution/account-identity-resolver.js";
+import { analyticsRoleFor } from "../transaction-ai/analytics-role.js";
+import { classifyAndGrade } from "../transaction-ai/advisory.js";
+import { redactForAi } from "../transaction-ai/redaction.js";
+import type { ClassifierInput } from "../transaction-ai/types.js";
+
+// ---------------------------------------------------------------------------
+// Transaction Intelligence Engine — account-identity-aware reclassification
+// (Real Case 1): the classifier above is deliberately TEXT-ONLY (see its own
+// header comment) — it cannot know that "Zable Card" is a credit card the
+// user owns. This is the second, independent evidence source: if the
+// payee/counterparty resolves to a KNOWN OWNED CREDIT_CARD account, that is
+// strong evidence for CREDIT_CARD_REPAYMENT even when the notification's own
+// wording is generic ("Payment to Zable Card" with no "repayment"/"minimum
+// payment" language at all — exactly the real-device wording gap reported).
+// Deliberately requires HIGH resolver confidence (an exact last-4+institution
+// match, a user-confirmed mapping, or a unique account at that institution)
+// — a weak name-similarity guess must never silently reclassify spending
+// into a liability repayment; see resolveOwnedAccount()'s own tiering.
+// ---------------------------------------------------------------------------
+async function resolveCreditCardRepaymentPayee(
+  userId: string,
+  ctx: { counterpartyText: string | null; ownAccountId: string; client: Prisma.TransactionClient },
+): Promise<{ toAccountId: string; reasons: string[] } | null> {
+  if (!ctx.counterpartyText) return null;
+  const match = await resolveOwnedAccount({
+    userId,
+    counterpartyText: ctx.counterpartyText,
+    // A payee/counterparty name ("Zable Card", "Capital One") IS effectively
+    // an institution name in the real world — passing it as both lets Tier 4
+    // (a previously confirmed mapping) AND Tier 5 (exactly one owned
+    // CREDIT_CARD account whose bank/nickname matches) both be reachable
+    // from payee text alone, with no separate institution field required.
+    institutionHint: ctx.counterpartyText,
+    desiredAccountType: "CREDIT_CARD",
+    client: ctx.client,
+  });
+  if (!match.accountId || match.confidence !== "HIGH" || match.accountId === ctx.ownAccountId) return null;
+  return { toAccountId: match.accountId, reasons: [...match.reasons, "ACCOUNT_IDENTITY_CREDIT_CARD_REPAYMENT"] };
+}
+
+/** Real Case 2 evidence: is the counterparty ANY other account the user owns
+ *  (any type)? Used only as an analyticsRole hint (REVIEW instead of a
+ *  locked-in INCOME/SPENDING) — actual pairing/ledger effect is still
+ *  decided exclusively by detectAndPairInternalTransfer() once both sides
+ *  exist as transactions. Never itself creates or changes a transaction. */
+async function resolveInternalTransferCandidate(
+  userId: string,
+  ctx: { counterpartyText: string | null; ownAccountId: string; client: Prisma.TransactionClient },
+): Promise<{ accountId: string; reasons: string[] } | null> {
+  if (!ctx.counterpartyText) return null;
+  const match = await resolveOwnedAccount({ userId, counterpartyText: ctx.counterpartyText, client: ctx.client });
+  if (!match.accountId || match.accountId === ctx.ownAccountId) return null;
+  return { accountId: match.accountId, reasons: [...match.reasons, "ACCOUNT_IDENTITY_POSSIBLE_TRANSFER"] };
+}
 
 // ---------------------------------------------------------------------------
 // Financial Event orchestration — the semantic layer between notification
@@ -175,6 +230,45 @@ export async function linkCreditCardRepayment(
   return match.id;
 }
 
+/**
+ * Section 5 ("preserve/link the DirectDebitMandate in all relevant cases —
+ * the Payments -> Direct Debits UI should still display the payment where
+ * appropriate even if its economic eventKind is CREDIT_CARD_REPAYMENT"):
+ * find/create the company mandate collected by DD (the same identity
+ * recordUpcomingDirectDebitLike/detectDirectDebit key on:
+ * userId+accountId+normalizedCompanyName) and attach this transaction to its
+ * payment history. Deliberately does NOT touch transactionType — unlike
+ * detectDirectDebit() (which always sets transactionType="DIRECT_DEBIT",
+ * exactly wrong here: it would silently undo the CREDIT_CARD_REPAYMENT
+ * spending exclusion this whole round exists to fix) — the mandate link and
+ * the economic-purpose classification are independent facts about the same
+ * payment, not a package deal.
+ */
+export async function linkCreditCardRepaymentToMandate(
+  userId: string,
+  ctx: { transactionId: string; accountId: string; merchantName: string | null; amountMinor: number; bookedAt: Date },
+  client: Prisma.TransactionClient = prisma,
+): Promise<string | null> {
+  const company = (ctx.merchantName ?? "").trim();
+  const normalized = normaliseCompany(company);
+  if (!normalized) return null;
+  const existing = await client.directDebitMandate.findUnique({
+    where: { userId_accountId_normalizedCompanyName: { userId, accountId: ctx.accountId, normalizedCompanyName: normalized } },
+    select: { id: true },
+  });
+  // Only ever ATTACH to an already-known mandate (typically seeded by an
+  // earlier UPCOMING pre-alert) — never spawn a brand-new one from this
+  // path alone, since "collected by Direct Debit" was only a paymentRail
+  // guess, not text evidence strong enough to originate a mandate.
+  if (!existing) return null;
+  await client.transaction.update({
+    where: { id: ctx.transactionId },
+    data: { directDebitMandateId: existing.id, recurringKind: "DIRECT_DEBIT" },
+  });
+  await recomputeMandate(userId, existing.id, client);
+  return existing.id;
+}
+
 /** Reconcile a REFUNDED/REVERSED financial event against the most recent
  *  matching completed expense: creates the standard offsetting income
  *  correction (reusing the exact pattern the existing manual /refund route
@@ -284,6 +378,96 @@ export async function ingestFinancialEvent(
 
   const posting = decidePosting({ lifecycle: classified.lifecycle, confidenceLevel: classified.confidenceLevel });
 
+  // ---------------------------------------------------------------------
+  // Transaction Intelligence Engine: account-identity-aware refinement.
+  // The classifier above is text-only; this step adds the second evidence
+  // source (the owned-account graph) it deliberately doesn't have access
+  // to. Real Case 1 fix: a payee resolving to a known owned CREDIT_CARD
+  // account reclassifies EVENT_KIND even when the wording alone wouldn't.
+  // Real Case 2: an unresolved counterparty match against ANY owned account
+  // only ever produces a REVIEW-grade analyticsRole hint here — the actual
+  // internal-transfer pairing/reclassification still happens exclusively in
+  // detectAndPairInternalTransfer() once both sides exist as transactions.
+  // ---------------------------------------------------------------------
+  let effectiveEventKind: FinEventKind = classified.eventKind;
+  let effectivePaymentRail: PaymentRail | null = classified.paymentRail ?? null;
+  // The counterparty account resolved by EITHER path below (credit-card
+  // liability destination, or a general owned-account transfer candidate) —
+  // direction decides whether this is the "from" or "to" side relative to
+  // input.accountId when the FinancialEvent/Transaction rows are written.
+  let resolvedCounterpartyAccountId: string | null = null;
+  let internalTransferCandidate = false;
+  const reasons: string[] = classified.reasonCode ? [classified.reasonCode] : [];
+  // Structured sender/recipient fields (when the caller supplied them — e.g.
+  // "SARDAR SAEED" for a bank-transfer-style notification) are a more
+  // reliable counterparty signal than classified.merchantName, which falls
+  // back to the notification's own title (e.g. "Halifax") when no real
+  // merchant was extracted from the text — exactly wrong for transfer/
+  // repayment-payee resolution, so they're checked first.
+  const counterpartyText = (classified.expectedDirection === "INCOME" ? input.senderName : input.recipientName) ?? classified.merchantName ?? null;
+
+  if (classified.expectedDirection === "EXPENSE" && effectiveEventKind !== "CREDIT_CARD_REPAYMENT") {
+    const ccMatch = await resolveCreditCardRepaymentPayee(userId, { counterpartyText, ownAccountId: input.accountId, client });
+    if (ccMatch) {
+      effectiveEventKind = "CREDIT_CARD_REPAYMENT";
+      resolvedCounterpartyAccountId = ccMatch.toAccountId;
+      reasons.push(...ccMatch.reasons);
+      if (!effectivePaymentRail && looksLikeDirectDebit(input.redactedText)) effectivePaymentRail = "DIRECT_DEBIT";
+    }
+  }
+  if (effectiveEventKind !== "CREDIT_CARD_REPAYMENT" && (classified.expectedDirection === "INCOME" || classified.expectedDirection === "EXPENSE")) {
+    const transferMatch = await resolveInternalTransferCandidate(userId, { counterpartyText, ownAccountId: input.accountId, client });
+    if (transferMatch) {
+      internalTransferCandidate = true;
+      resolvedCounterpartyAccountId = transferMatch.accountId;
+      reasons.push(...transferMatch.reasons);
+    }
+  }
+  // Direction-aware from/to: EXPENSE means money leaves input.accountId
+  // (input.accountId is "from", the resolved counterparty is "to"); INCOME
+  // is the mirror image. TRANSFER/unknown direction: no resolved endpoint to
+  // orient, so both stay as the plain accountId only.
+  const fromAccountId = classified.expectedDirection === "INCOME" ? resolvedCounterpartyAccountId : input.accountId;
+  const toAccountId = classified.expectedDirection === "INCOME" ? input.accountId : resolvedCounterpartyAccountId;
+
+  // AI advisory refinement — ONLY when deterministic confidence isn't
+  // already HIGH, and ONLY ever allowed to refine eventKind/paymentRail
+  // (still validated by the exact same downstream posting policy as any
+  // deterministic classification) — never an account id, never lifecycle,
+  // never amount/direction. See services/transaction-ai/advisory.ts.
+  if (classified.confidenceLevel !== "HIGH" && classified.isFinancial) {
+    const aiInput: ClassifierInput = {
+      sourceInstitution: input.senderBankName ?? input.recipientBankName ?? null,
+      sourcePackage: input.sourcePackage,
+      title: input.title,
+      sanitizedText: redactForAi(input.redactedText),
+      amountMinor: classified.amountMinor,
+      currency: "GBP",
+      direction: classified.expectedDirection,
+      accountHint: null,
+      candidateOwnedAccounts: [],
+      knownMerchant: classified.merchantName,
+      deterministicClassification: { eventKind: effectiveEventKind, paymentRail: effectivePaymentRail, confidenceLevel: classified.confidenceLevel },
+    };
+    const decision = await classifyAndGrade(aiInput, classified.confidenceLevel);
+    if (decision.output) {
+      reasons.push(`AI_SUGGESTION_${decision.action}`, ...decision.output.reasons.map((r) => `AI:${r}`));
+      if (decision.action === "ALLOW_AUTOMATIC") {
+        effectiveEventKind = decision.output.eventKind;
+        if (decision.output.paymentRail) effectivePaymentRail = decision.output.paymentRail;
+        if (decision.output.isLikelyInternalTransfer) internalTransferCandidate = true;
+      }
+    }
+  }
+
+  const analytics = analyticsRoleFor({
+    eventKind: effectiveEventKind,
+    expectedDirection: classified.expectedDirection ?? null,
+    lifecycle: classified.lifecycle,
+    isInternalTransferCandidate: internalTransferCandidate,
+  });
+  reasons.push(analytics.reason);
+
   let matched: FinancialEvent | null = null;
   if (classified.lifecycle === "COMPLETED" || classified.lifecycle === "DECLINED" || classified.lifecycle === "FAILED" || classified.lifecycle === "REVERSED") {
     matched = await findMatchingPendingEvent(userId, { accountId: input.accountId, amountMinor: classified.amountMinor, merchantName: classified.merchantName, occurredAt: input.occurredAt }, client);
@@ -294,6 +478,8 @@ export async function ingestFinancialEvent(
     eventRow = await client.financialEvent.update({
       where: { id: matched.id },
       data: {
+        eventKind: effectiveEventKind,
+        paymentRail: effectivePaymentRail ?? undefined,
         lifecycle: classified.lifecycle,
         moneyEffect: classified.moneyEffect,
         ledgerImpact: posting.ledgerImpact,
@@ -301,6 +487,10 @@ export async function ingestFinancialEvent(
         confidenceScore: classified.confidenceScore,
         confidenceLevel: classified.confidenceLevel,
         reasonCode: classified.reasonCode,
+        analyticsRole: analytics.role,
+        fromAccountId: fromAccountId ?? undefined,
+        toAccountId: toAccountId ?? undefined,
+        classificationReasons: reasons,
         notificationImportId: input.notificationImportId ?? matched.notificationImportId ?? undefined,
       },
     });
@@ -312,14 +502,18 @@ export async function ingestFinancialEvent(
         sourceType: input.sourceType ?? "NOTIFICATION",
         sourcePackage: input.sourcePackage,
         sourceFingerprint: input.sourceFingerprint,
-        eventKind: classified.eventKind,
+        eventKind: effectiveEventKind,
         lifecycle: classified.lifecycle,
-        paymentRail: classified.paymentRail ?? undefined,
+        paymentRail: effectivePaymentRail ?? undefined,
         amountMinor: classified.amountMinor ?? undefined,
         currency: "GBP",
         expectedDirection: classified.expectedDirection ?? undefined,
         moneyEffect: classified.moneyEffect,
         ledgerImpact: posting.ledgerImpact,
+        analyticsRole: analytics.role,
+        fromAccountId: fromAccountId ?? undefined,
+        toAccountId: toAccountId ?? undefined,
+        classificationReasons: reasons,
         expectedAt: classified.expectedAt ?? undefined,
         occurredAt: input.occurredAt,
         merchantName: classified.merchantName ?? undefined,
@@ -338,10 +532,10 @@ export async function ingestFinancialEvent(
 
   // UPCOMING Direct Debit / credit-card repayment pre-alert: seed/update the
   // mandate, never post a transaction.
-  if (classified.lifecycle === "UPCOMING" && (classified.eventKind === "DIRECT_DEBIT" || classified.eventKind === "CREDIT_CARD_REPAYMENT") && classified.amountMinor) {
+  if (classified.lifecycle === "UPCOMING" && (effectiveEventKind === "DIRECT_DEBIT" || effectiveEventKind === "CREDIT_CARD_REPAYMENT") && classified.amountMinor) {
     const mandateId = await recordUpcomingDirectDebitLike(
       userId,
-      { accountId: input.accountId, merchantName: classified.merchantName, amountMinor: classified.amountMinor, expectedAt: classified.expectedAt, kind: classified.eventKind },
+      { accountId: input.accountId, merchantName: classified.merchantName, amountMinor: classified.amountMinor, expectedAt: classified.expectedAt, kind: effectiveEventKind },
       client,
     );
     if (mandateId) eventRow = await client.financialEvent.update({ where: { id: eventRow.id }, data: { directDebitMandateId: mandateId } });
@@ -361,7 +555,7 @@ export async function ingestFinancialEvent(
         description: classified.merchantName ?? input.title,
         merchantName: classified.merchantName ?? input.title,
         categoryId: input.categoryId ?? undefined,
-        transactionType: classified.eventKind === "CREDIT_CARD_REPAYMENT" ? "CREDIT_CARD_REPAYMENT" : undefined,
+        transactionType: effectiveEventKind === "CREDIT_CARD_REPAYMENT" ? "CREDIT_CARD_REPAYMENT" : undefined,
         senderName: input.senderName ?? undefined,
         senderBankName: input.senderBankName ?? undefined,
         recipientName: input.recipientName ?? undefined,
@@ -373,9 +567,41 @@ export async function ingestFinancialEvent(
       client,
     );
 
-    if (classified.eventKind === "CREDIT_CARD_REPAYMENT") {
-      await linkCreditCardRepayment(userId, { amountMinor: classified.amountMinor, merchantName: classified.merchantName }, client);
+    if (effectiveEventKind === "CREDIT_CARD_REPAYMENT") {
+      if (toAccountId) {
+        // The resolved credit-card destination is an OWNED account — link it
+        // via recipientAccountId (the same soft-ref field a same-user
+        // transfer would use), so the detail view can show a real "To:
+        // Zable Credit Card" rather than only free-text, and reduce its
+        // liability balance directly (never via a second ledger row/
+        // internal-transfer pairing — mirrors linkCreditCardRepayment()'s
+        // own direct-balance-adjustment approach, just with a resolved id
+        // instead of a best-effort name match).
+        await client.transaction.update({ where: { id: transaction.id }, data: { recipientAccountId: toAccountId } });
+        await client.bankAccount.updateMany({ where: { id: toAccountId, userId, balanceAuthority: { not: "PROVIDER" } }, data: { balanceMinor: { decrement: BigInt(classified.amountMinor) } } });
+      } else {
+        await linkCreditCardRepayment(userId, { amountMinor: classified.amountMinor, merchantName: classified.merchantName }, client);
+      }
+      // Attach to an existing DD mandate (e.g. seeded by an earlier UPCOMING
+      // pre-alert) so the Direct Debits UI still shows this payment — never
+      // creates a new mandate here, and never touches transactionType.
+      await linkCreditCardRepaymentToMandate(userId, { transactionId: transaction.id, accountId: input.accountId, merchantName: classified.merchantName, amountMinor: classified.amountMinor, bookedAt: input.occurredAt }, client);
     } else {
+      // Real Case 2: when the counterparty already resolved to one of the
+      // user's OWN accounts (evidence stronger than a bare name match),
+      // record it as senderAccountId/recipientAccountId BEFORE pairing —
+      // detectAndPairInternalTransfer()'s own scorer weights exact
+      // account-identity evidence well above name similarity, so this can
+      // turn what would otherwise be a POSSIBLE (Review-only) match into an
+      // auto-paired CONFIRMED/HIGH internal transfer.
+      if (internalTransferCandidate && resolvedCounterpartyAccountId) {
+        await client.transaction.update({
+          where: { id: transaction.id },
+          data: classified.expectedDirection === "INCOME"
+            ? { senderAccountId: resolvedCounterpartyAccountId }
+            : { recipientAccountId: resolvedCounterpartyAccountId },
+        });
+      }
       const transferConfidence = await detectAndPairInternalTransfer(userId, transaction.id, client);
       if (transferConfidence !== "CONFIRMED" && transferConfidence !== "HIGH") {
         await detectDirectDebit(

@@ -95,15 +95,26 @@ describe("Financial Event Intelligence — critical acceptance criteria", () => 
     const acc = await newAccount(userId, 500000n);
     const before = await balance(acc.id);
 
+    // Deliberately relative to the REAL current time, not a hardcoded date:
+    // /upcoming-payments windows off wall-clock `now`, independent of this
+    // notification's own occurredAt, so a fixed absolute date (e.g. "August
+    // 20th" pinned to a specific year) silently drifts into the past and
+    // fails this test purely from time passing — completely unrelated to
+    // the classifier logic actually under test.
+    const now = new Date();
+    const target = new Date(now.getTime() + 5 * 86_400_000);
+    const monthName = target.toLocaleString("en-US", { month: "long", timeZone: "UTC" });
+    const targetDay = target.getUTCDate();
+
     const res = await auto(accessToken, {
       sourcePackage: "unknown.zable",
       title: "Zable",
-      redactedSourceText: "We'll take your monthly repayment of £254.43 from your Monzo account ending with 2815 on August 20th",
+      redactedSourceText: `We'll take your monthly repayment of £254.43 from your Monzo account ending with 2815 on ${monthName} ${targetDay}th`,
       direction: "EXPENSE",
       amountMinor: 25443,
       merchant: "Zable",
       accountId: acc.id,
-      occurredAt: "2026-08-15T10:00:00.000Z", // fixed, deterministic — see expectedAt assertion below
+      occurredAt: now.toISOString(),
     });
 
     expect(res.status).toBe(201);
@@ -116,7 +127,7 @@ describe("Financial Event Intelligence — critical acceptance criteria", () => 
     expect(event.lifecycle).toBe("UPCOMING");
     expect(event.moneyEffect).toBe("NONE");
     expect(event.amountMinor).toBe(25443);
-    expect(event.expectedAt?.toISOString().slice(0, 10)).toBe("2026-08-20"); // "on August 20th"
+    expect(event.expectedAt?.toISOString().slice(0, 10)).toBe(target.toISOString().slice(0, 10)); // "on <monthName> <targetDay>th"
 
     const txnCountBefore = await prisma.transaction.count({ where: { userId } });
     expect(txnCountBefore).toBe(0); // no ledger transaction created at all
