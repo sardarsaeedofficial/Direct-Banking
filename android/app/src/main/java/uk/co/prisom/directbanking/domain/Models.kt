@@ -109,4 +109,19 @@ data class TransactionSummary(
     // (§9 acceptance criteria) — it moves cash but must never render or be
     // labelled as Income, on either a Transaction or a FinancialEvent row.
     val isCreditCardRepayment: Boolean get() = transactionType == "CREDIT_CARD_REPAYMENT" || eventKind == "CREDIT_CARD_REPAYMENT"
+
+    // Transaction Intelligence Engine (§18): plain-English summary of how
+    // this shows up in analytics — computed purely from fields the backend
+    // already sends (transactionType/direction/lifecycle), the same pattern
+    // as isCreditCardRepayment/isInternalTransfer above. Never a raw enum
+    // value shown to the user.
+    val analyticsSummary: String? get() = when {
+        isInternalTransfer || isPossibleTransfer -> "Not income / not spending"
+        isCreditCardRepayment -> "Not counted as spending"
+        transactionType == "REFUND" -> "Refund — not counted as spending"
+        lifecycle != "COMPLETED" -> null // nothing has moved yet; no analytics role to show
+        direction == "EXPENSE" -> "Counted as spending"
+        direction == "INCOME" -> "Counted as income"
+        else -> null
+    }
 }

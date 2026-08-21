@@ -245,6 +245,7 @@ model User {
   transactionCorrections TransactionCorrection[]
   reconciliationDecisions ReconciliationDecision[]
   financialEvents FinancialEvent[]
+  counterpartyAccountMappings CounterpartyAccountMapping[]
 }
 
 model Session {
@@ -302,6 +303,7 @@ model BankAccount {
   expected     ExpectedPayment[]
   ddMandates   DirectDebitMandate[]
   statementImports StatementImport[]
+  counterpartyAccountMappings CounterpartyAccountMapping[]
 
   @@index([userId])
 }
@@ -1014,6 +1016,14 @@ enum CorrectionAction {
   // (e.g. an upcoming/declined notification that was incorrectly posted as a
   // completed transaction before this phase's lifecycle safeguards existed).
   LIFECYCLE_RECLASSIFY
+  // Transaction Intelligence Engine: the user confirmed which owned account a
+  // recurring counterparty (e.g. "Zable Card") actually belongs to. Persisted
+  // as a CounterpartyAccountMapping so future notifications from the same
+  // counterparty auto-resolve at high confidence without asking again.
+  CONFIRM_COUNTERPARTY_ACCOUNT
+  // The user changed a transaction's economic purpose (e.g. Purchase ->
+  // Credit-card repayment) independent of any category/merchant/DD change.
+  RECLASSIFY_EVENT_KIND
 }
 
 model TransactionCorrection {
@@ -1100,6 +1110,23 @@ enum FinEventConfidenceLevel {
   LOW
 }
 
+// ---------- Transaction Intelligence Engine ----------
+// Separate from eventKind (the event's raw economic KIND) and lifecycle
+// (its settlement state): analyticsRole is how the event counts in
+// analytics/budgets, and — unlike eventKind — is explicitly REVISABLE. A
+// receiving-bank credit starts as provisional INCOME; once a matching
+// owned-account debit is found it is reclassified to INTERNAL_TRANSFER and
+// removed from income analytics without ever having been "locked in".
+enum AnalyticsRole {
+  SPENDING
+  INCOME
+  INTERNAL_TRANSFER
+  LIABILITY_REPAYMENT
+  REFUND
+  IGNORE
+  REVIEW
+}
+
 model FinancialEvent {
   id     String @id @default(cuid())
   userId String
@@ -1134,6 +1161,20 @@ model FinancialEvent {
   moneyEffect       MoneyEffect
   ledgerImpact      LedgerImpact
 
+  // Transaction Intelligence Engine (additive, all nullable/defaulted so no
+  // backfill is required — existing rows simply have no opinion yet).
+  // analyticsRole: see enum doc above. fromAccountId/toAccountId: the
+  // resolved owned-or-external endpoints (soft references, same pattern as
+  // accountId above) — e.g. a Monzo->Zable repayment has fromAccountId =
+  // the Monzo BankAccount, toAccountId = the Zable CREDIT_CARD BankAccount
+  // when mapped. classificationReasons: short, safe, application-generated
+  // reason codes for the Review Centre / transaction detail explanation —
+  // never AI chain-of-thought (see services/transaction-ai/).
+  analyticsRole         AnalyticsRole?
+  fromAccountId         String?
+  toAccountId           String?
+  classificationReasons String[] @default([])
+
   expectedAt DateTime?
   occurredAt DateTime?
   settledAt  DateTime?
@@ -1159,8 +1200,50 @@ model FinancialEvent {
   // NotificationImport's userId+sourceHash uniqueness.
   @@unique([userId, sourceFingerprint])
   @@index([userId, lifecycle])
+  @@index([userId, analyticsRole])
   @@index([userId, eventKind])
   @@index([accountId])
   @@index([directDebitMandateId])
   @@index([linkedTransactionId])
+}
+
+// A user-confirmed (or system-learned, from CONFIRMED-strength pairing)
+// mapping from a recurring counterparty's normalised text identity ("ZABLE
+// CARD", "SARDAR SAEED") to one of the user's own owned accounts. This is
+// the persisted form of AccountIdentityResolver's highest-confidence
+// evidence tier ("EXACT previously user-confirmed mapping") — once learned,
+// a future notification from the same counterparty resolves deterministically
+// without asking again and without needing the AI classifier. Never created
+// from AI output alone (see services/transaction-ai/) — only from an
+// explicit user action (confirming a review item, manually pairing a
+// transfer, manually reclassifying a repayment) or from very strong
+// deterministic pairing evidence.
+model CounterpartyAccountMapping {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Normalised (uppercased, punctuation-stripped) counterparty text — the
+  // same normalisation direct-debit.service.ts's normaliseCompany() and
+  // internal-transfer.service.ts's normaliseName() already use, so a
+  // mapping learned from one code path is found by the other.
+  counterpartyKey String
+
+  accountId String
+  account   BankAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  // "USER" (explicit confirmation) | "SYSTEM" (learned from a CONFIRMED-
+  // strength deterministic pairing) — surfaced in explainability, never
+  // treated differently for resolution purposes (both are the same evidence
+  // tier once persisted).
+  confirmedBy String @default("USER")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One resolved account per counterparty per user — re-confirming updates
+  // the existing mapping rather than creating a duplicate.
+  @@unique([userId, counterpartyKey])
+  @@index([userId])
+  @@index([accountId])
 }

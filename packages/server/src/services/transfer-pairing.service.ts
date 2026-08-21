@@ -3,6 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "../db.js";
 import { defaultTypeFor } from "./transactions.service.js";
 import { recordCorrection } from "./corrections.service.js";
+import { confirmCounterpartyAccount } from "./account-resolution/account-identity-resolver.js";
 
 // Manual internal-transfer pairing (Phase 5) — completes the Phase 1 limitation
 // where two sides of an own-account transfer weren't auto-detected. The user
@@ -20,6 +21,9 @@ const SIDE_SELECT = {
   currency: true,
   transactionType: true,
   internalTransferGroupId: true,
+  merchantName: true,
+  senderName: true,
+  recipientName: true,
 } satisfies Prisma.TransactionSelect;
 
 /**
@@ -47,6 +51,16 @@ export async function pairInternalTransfer(userId: string, aId: string, bId: str
         data: { transactionType: "INTERNAL_TRANSFER", internalTransferGroupId: groupId, internalTransferConfidence: "CONFIRMED" },
       });
     }
+    // Real Case 2 (§9 "user confirmation must also train the future rule"):
+    // a manual pair confirms BOTH sides are genuinely each other's owned
+    // account — learn it in both directions (system-confirmed, same
+    // strength as a user's own explicit confirmation) so a future
+    // notification from either counterparty's text resolves automatically
+    // next time, without needing another manual pair.
+    const aCounterparty = a.merchantName ?? (a.direction === "INCOME" ? a.senderName : a.recipientName);
+    const bCounterparty = b.merchantName ?? (b.direction === "INCOME" ? b.senderName : b.recipientName);
+    if (bCounterparty) await confirmCounterpartyAccount(userId, bCounterparty, a.accountId, "SYSTEM", tx);
+    if (aCounterparty) await confirmCounterpartyAccount(userId, aCounterparty, b.accountId, "SYSTEM", tx);
     await recordCorrection(
       userId,
       {

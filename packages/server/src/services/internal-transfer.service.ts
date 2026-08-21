@@ -314,3 +314,57 @@ export async function detectAndPairInternalTransfer(
 
   return "NOT_INTERNAL";
 }
+
+/**
+ * Real Case 2 ("a credit into an account must not permanently become INCOME
+ * merely because the receiving notification arrived before the sending
+ * notification"): re-attempts pairing for every currently-unpaired
+ * transaction that might still resolve to an internal transfer — either
+ * never scored (legacy rows from before this evidence existed) or left at
+ * POSSIBLE (weak evidence at the time, but a matching side may exist now).
+ *
+ * Safe to call repeatedly/on a schedule: detectAndPairInternalTransfer()
+ * itself is idempotent (an already-paired transaction is a fast no-op), and
+ * this only ever widens/upgrades a match, never creates a false pair — the
+ * same confidence gates apply. Bounded by `windowDays` so a full-history
+ * reconciliation is an explicit, separate operation, not automatic on every
+ * call (mirrors historical-review.service.ts's own bounded-scan pattern).
+ */
+export async function reconcileUnmatchedTransfers(
+  userId: string,
+  windowDays = 30,
+  client: Prisma.TransactionClient = prisma,
+): Promise<{ scanned: number; newlyPaired: number; stillPossible: number }> {
+  const since = new Date(Date.now() - windowDays * 24 * 60 * MIN);
+  const candidates = await client.transaction.findMany({
+    where: {
+      userId,
+      parentId: null,
+      internalTransferGroupId: null,
+      transactionType: { not: "INTERNAL_TRANSFER" },
+      status: { in: ["COMPLETED", "PENDING"] },
+      bookedAt: { gte: since },
+      direction: { in: ["INCOME", "EXPENSE"] },
+    },
+    select: { id: true },
+    orderBy: { bookedAt: "asc" }, // earlier side first, so a later-arriving match is found by re-scanning the earlier row too
+  });
+
+  // Track distinct groups, not transaction rows — pairing a transaction also
+  // resolves its counterpart, which is still in `candidates` (it satisfied
+  // the same unpaired-at-query-time filter) and would otherwise be
+  // double-counted as a second "newly paired" result when its own turn
+  // comes up later in this loop.
+  const pairedGroupIds = new Set<string>();
+  let stillPossible = 0;
+  for (const c of candidates) {
+    const result = await detectAndPairInternalTransfer(userId, c.id, client);
+    if (isAutoInternal(result)) {
+      const row = await client.transaction.findUnique({ where: { id: c.id }, select: { internalTransferGroupId: true } });
+      if (row?.internalTransferGroupId) pairedGroupIds.add(row.internalTransferGroupId);
+    } else if (result === "POSSIBLE") {
+      stillPossible++;
+    }
+  }
+  return { scanned: candidates.length, newlyPaired: pairedGroupIds.size, stillPossible };
+}

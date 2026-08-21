@@ -4,6 +4,8 @@ import { classifyNotification, type FinEventLifecycle } from "./classifier.js";
 import { reverseTransactionBalance } from "../transactions.service.js";
 import { KNOWN_BANKS } from "../notification-import.service.js";
 import { HttpError } from "../../middleware/error.js";
+import { resolveOwnedAccount } from "../account-resolution/account-identity-resolver.js";
+import { normaliseCompany } from "../direct-debit.service.js";
 
 // ---------------------------------------------------------------------------
 // Historical suspicious-record review (§27)
@@ -126,4 +128,118 @@ export async function applyHistoricalCorrection(
   });
 
   return { transactionId: txn.id, correctionId: correction.id };
+}
+
+// ---------------------------------------------------------------------------
+// Transaction Intelligence Engine (§15): identify EXISTING transactions whose
+// ECONOMIC PURPOSE (not lifecycle) would classify differently under the
+// account-identity-aware rules this round adds — e.g. a Zable repayment
+// that posted as an ordinary Purchase before AccountIdentityResolver
+// existed, or a same-user incoming transfer still sitting as plain Income.
+// Same safety contract as findSuspiciousLegacyTransactions: read-only,
+// bounded scan, never mutates — the caller applies a confirmed correction
+// via the EXISTING PATCH /transactions/:id route (transactionType +
+// counterpartyAccountId), which already records a RECLASSIFY_EVENT_KIND /
+// CONFIRM_COUNTERPARTY_ACCOUNT correction and adjusts the liability balance
+// idempotently — no separate "apply" path is duplicated here.
+// ---------------------------------------------------------------------------
+
+export interface SuspiciousPurposeCandidate {
+  transactionId: string;
+  currentTransactionType: string | null;
+  amountMinor: string;
+  direction: string;
+  bookedAt: string;
+  merchantName: string | null;
+  counterpartyText: string | null;
+  suggestedTransactionType: "CREDIT_CARD_REPAYMENT" | "INTERNAL_TRANSFER";
+  suggestedAccountId: string;
+  suggestedAccountLabel: string;
+  reasons: string[];
+}
+
+const PURPOSE_SCAN_TAKE = 500; // bounded, mirrors findSuspiciousLegacyTransactions
+
+export async function findSuspiciousEconomicPurpose(userId: string, client: Prisma.TransactionClient = prisma): Promise<SuspiciousPurposeCandidate[]> {
+  const txns = await client.transaction.findMany({
+    where: {
+      userId,
+      status: "COMPLETED",
+      parentId: null,
+      transactionType: { notIn: ["CREDIT_CARD_REPAYMENT", "INTERNAL_TRANSFER", "TRANSFER", "REFUND"] },
+      direction: { in: ["INCOME", "EXPENSE"] },
+    },
+    orderBy: { bookedAt: "desc" },
+    take: PURPOSE_SCAN_TAKE,
+    select: { id: true, accountId: true, direction: true, amountMinor: true, bookedAt: true, merchantName: true, senderName: true, recipientName: true, transactionType: true },
+  });
+
+  const candidates: SuspiciousPurposeCandidate[] = [];
+  for (const t of txns) {
+    const counterpartyText = (t.direction === "INCOME" ? t.senderName : t.recipientName) ?? t.merchantName ?? null;
+    if (!counterpartyText) continue;
+
+    if (t.direction === "EXPENSE") {
+      // Real Case 1 pattern: does this payee now resolve to a known owned
+      // CREDIT_CARD account?
+      const match = await resolveOwnedAccount({ userId, counterpartyText, institutionHint: counterpartyText, desiredAccountType: "CREDIT_CARD", client });
+      if (match.accountId && match.confidence === "HIGH" && match.accountId !== t.accountId) {
+        candidates.push({
+          transactionId: t.id, currentTransactionType: t.transactionType, amountMinor: t.amountMinor.toString(), direction: t.direction,
+          bookedAt: t.bookedAt.toISOString(), merchantName: t.merchantName, counterpartyText,
+          suggestedTransactionType: "CREDIT_CARD_REPAYMENT", suggestedAccountId: match.accountId, suggestedAccountLabel: counterpartyText,
+          reasons: match.reasons,
+        });
+        continue;
+      }
+    }
+    // Real Case 2 pattern: does the counterparty now resolve to ANY other
+    // owned account (person-name or previously-confirmed mapping)?
+    const transferMatch = await resolveOwnedAccount({ userId, counterpartyText, client });
+    if (transferMatch.accountId && transferMatch.accountId !== t.accountId) {
+      candidates.push({
+        transactionId: t.id, currentTransactionType: t.transactionType, amountMinor: t.amountMinor.toString(), direction: t.direction,
+        bookedAt: t.bookedAt.toISOString(), merchantName: t.merchantName, counterpartyText,
+        suggestedTransactionType: "INTERNAL_TRANSFER", suggestedAccountId: transferMatch.accountId, suggestedAccountLabel: counterpartyText,
+        reasons: transferMatch.reasons,
+      });
+    }
+  }
+  return candidates;
+}
+
+/**
+ * §15 "DD repayment missing mandate association": a completed
+ * CREDIT_CARD_REPAYMENT with no directDebitMandateId, where a mandate for
+ * the same company already exists on the same account (e.g. seeded by an
+ * earlier pre-alert, or created after this repayment posted) — read-only.
+ */
+export interface SuspiciousMandateGapCandidate {
+  transactionId: string;
+  mandateId: string;
+  companyName: string;
+  amountMinor: string;
+  bookedAt: string;
+}
+
+export async function findRepaymentsMissingMandate(userId: string, client: Prisma.TransactionClient = prisma): Promise<SuspiciousMandateGapCandidate[]> {
+  const txns = await client.transaction.findMany({
+    where: { userId, status: "COMPLETED", transactionType: "CREDIT_CARD_REPAYMENT", directDebitMandateId: null },
+    orderBy: { bookedAt: "desc" },
+    take: PURPOSE_SCAN_TAKE,
+    select: { id: true, accountId: true, merchantName: true, amountMinor: true, bookedAt: true },
+  });
+  if (txns.length === 0) return [];
+
+  const mandates = await client.directDebitMandate.findMany({ where: { userId }, select: { id: true, accountId: true, companyName: true, normalizedCompanyName: true } });
+  const candidates: SuspiciousMandateGapCandidate[] = [];
+  for (const t of txns) {
+    if (!t.merchantName) continue;
+    const normalized = normaliseCompany(t.merchantName);
+    const mandate = mandates.find((m) => m.accountId === t.accountId && m.normalizedCompanyName === normalized);
+    if (mandate) {
+      candidates.push({ transactionId: t.id, mandateId: mandate.id, companyName: mandate.companyName, amountMinor: t.amountMinor.toString(), bookedAt: t.bookedAt.toISOString() });
+    }
+  }
+  return candidates;
 }

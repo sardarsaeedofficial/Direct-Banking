@@ -242,6 +242,7 @@ private fun TransactionDetailDialog(
                 // present, Merchant/payee, Payment rail, Category, Source/evidence.
                 DetailRow("Type", if (t.isCreditCardRepayment) "Credit-card repayment" else prettyType(t.transactionType) ?: t.direction)
                 DetailRow("Lifecycle", lifecycleLabel(t.lifecycle))
+                DetailRow("Analytics", t.analyticsSummary)
                 DetailRow("Account", t.account)
                 DetailRow("Occurred", t.bookedAt?.take(10))
                 DetailRow("Expected", t.expectedAt?.take(10)?.let { expectedDateLabel(t.expectedAt) })
