@@ -32,6 +32,87 @@ export function looksLikeDirectDebit(text: string | null | undefined): boolean {
   return /\b(direct debit|directdebit|\bdd\b)\b/i.test(text) || /\bdirect\s+debit\b/i.test(text);
 }
 
+// ---------------------------------------------------------------------------
+// Collector/merchant display-name normalisation (Direct Debit Intelligence &
+// Reconciliation round, §3).
+//
+// A bank notification's own wording frequently runs the collector's name
+// straight into the sentence describing what's happening to it ("MANCHESTER
+// C C leaves your account ending 7164 this week"), and on-device/best-effort
+// merchant extraction can end up keeping a fragment of that trailing wording
+// ("Manchester C C Leaves Your") rather than isolating the collector alone.
+// This is never fed into a ledger decision — purely a display/identity-key
+// cleanup — but it matters a great deal for identity: normaliseCompany()
+// folds "Manchester C C" and "Manchester C C Leaves Your" into two DIFFERENT
+// keys, which is exactly what silently splits one real-world collector into
+// two separate DirectDebitMandate rows (§8). Stripping the trailing action
+// wording BEFORE normaliseCompany()/mandate lookup ever sees it keeps one
+// collector as one mandate, and also fixes what the user sees on screen.
+//
+// Deliberately conservative: strips from the FIRST recognised action-phrase
+// match onward and falls back to the original string whenever that would
+// leave nothing usable — under-cleaning (an odd-looking name) is always
+// safer here than over-cleaning (silently truncating a real collector name
+// that happens to contain one of these words).
+// ---------------------------------------------------------------------------
+const COLLECTOR_ACTION_PHRASE_RE = new RegExp(
+  [
+    "will\\s+leave", "leaves?\\b", "leaving\\b", "is\\s+due\\s+to\\s+leave", "due\\s+to\\s+leave",
+    "will\\s+be\\s+(?:taken|collected)", "has\\s+been\\s+(?:taken|collected|paid)", "has\\s+left",
+    "we'?ll\\s+take", "we\\s+will\\s+take", "will\\s+take", "\\bdue\\s+on\\b",
+    "account\\s+ending", "ending\\s+(?:with\\s+)?\\d", "\\bthis\\s+week\\b", "\\btomorrow\\b", "\\btoday\\b",
+  ].join("|"),
+  "i",
+);
+
+/** Clean a raw collector/merchant candidate string down to just the
+ *  collector's own name, stripping any trailing notification wording. Safe,
+ *  idempotent no-op for a string that never contained such wording (ordinary
+ *  merchant names like "TESCO STORES 3245" or "CAPITAL ONE" pass through
+ *  unchanged). Never returns an empty string — falls back to the original
+ *  (trimmed) text rather than collapsing to nothing. */
+export function normaliseCollectorDisplayName(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const m = COLLECTOR_ACTION_PHRASE_RE.exec(trimmed);
+  const cleaned = (m ? trimmed.slice(0, m.index) : trimmed).replace(/[.,:;\-–—]+$/, "").trim();
+  return cleaned.length >= 2 ? cleaned : trimmed;
+}
+
+// ---------------------------------------------------------------------------
+// Collector category intelligence (§10) — a small, REUSABLE table of
+// pattern-based hints, not one-off hardcoding for a single named collector.
+// Deliberately advisory-only: this never assigns a real Category id (that
+// remains the existing merchant/category-rules system's job) — it only
+// contributes a safe, short, application-owned reason code (e.g.
+// "COLLECTOR_CATEGORY_COUNCIL_TAX") that the Review Centre/explainability UI
+// can show, matching the same "app-owned reason codes only" discipline the
+// AI advisory layer already follows.
+// ---------------------------------------------------------------------------
+export type CollectorCategoryGroup =
+  | "COUNCIL_TAX" | "INSURANCE" | "UTILITIES" | "COMMUNICATIONS" | "SUBSCRIPTION" | "OTHER";
+
+const COLLECTOR_CATEGORY_PATTERNS: Array<{ group: CollectorCategoryGroup; re: RegExp }> = [
+  { group: "COUNCIL_TAX", re: /council|borough|city\s+council|c\s*c\b/i },
+  { group: "INSURANCE", re: /insur(?:ance|er)?|assurance/i },
+  { group: "UTILITIES", re: /electric|gas\b|energy|water|utilit|british\s+gas|octopus|edf|eon\b/i },
+  { group: "COMMUNICATIONS", re: /mobile|broadband|telecom|vodafone|\bee\b|three\b|o2\b|sky\b|virgin\s*media|bt\b/i },
+  { group: "SUBSCRIPTION", re: /netflix|spotify|prime|subscription|disney|apple\s*(?:music|tv)/i },
+];
+
+/** Best-effort, non-authoritative category hint for a normalised collector
+ *  name — used only to add an explanatory reason code, never to assign a
+ *  real category. Returns null when nothing matches (never guesses "OTHER"
+ *  as a positive signal — absence of a hint is not itself information). */
+export function collectorCategoryHint(collectorName: string | null | undefined): CollectorCategoryGroup | null {
+  if (!collectorName) return null;
+  for (const { group, re } of COLLECTOR_CATEGORY_PATTERNS) {
+    if (re.test(collectorName)) return group;
+  }
+  return null;
+}
+
 export function median(nums: number[]): number {
   if (nums.length === 0) return 0;
   const s = [...nums].sort((a, b) => a - b);
@@ -342,7 +423,12 @@ export async function getUpcomingPayments(userId: string, days: number, now = ne
     const e = effectiveExpectation(m as unknown as MandateLike);
     return {
       mandateId: m.id,
-      companyName: m.companyName,
+      // A user-confirmed display alias (§12 — e.g. "MANCHESTER C C" ->
+      // "Manchester City Council", set via confirmCollectorAlias()) always
+      // wins over the raw notification-derived companyName for display;
+      // mandate IDENTITY/matching is untouched (normalizedCompanyName never
+      // changes), so this is purely cosmetic.
+      companyName: m.merchantAlias ?? m.companyName,
       account: m.account.nickname,
       accountBank: m.account.bankName,
       expectedDate: m.nextExpectedAt?.toISOString() ?? null,
@@ -358,4 +444,38 @@ export async function getUpcomingPayments(userId: string, days: number, now = ne
 
 function startOfDay(d: Date): Date {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+// ---------------------------------------------------------------------------
+// User corrections / learning (§12) — a user-confirmed collector display
+// name ("MANCHESTER C C" -> "Manchester City Council") is persisted onto the
+// mandate's existing merchantAlias field and always wins over the raw
+// notification-derived companyName wherever a mandate is displayed. This is
+// display-only: normalizedCompanyName (the mandate's real IDENTITY key used
+// for matching/reconciliation) is never touched, so confirming an alias can
+// never split or merge a mandate.
+//
+// Whether a Direct Debit collector IS a credit-card repayment (e.g. "this
+// Capital One DD is my credit-card repayment") is a DIFFERENT kind of user
+// correction, already handled by the existing, higher-priority
+// CounterpartyAccountMapping mechanism (confirmCounterpartyAccount() in
+// account-resolution/account-identity-resolver.ts) — resolveOwnedAccount()'s
+// Tier 4 (USER_CONFIRMED_MAPPING) is checked before Tier 5 (unique-at-
+// institution), so a user-confirmed repayment mapping already takes
+// precedence over both deterministic collector-category heuristics and any
+// AI advisory input, with no separate mechanism needed here.
+// ---------------------------------------------------------------------------
+
+/** Persist a user-confirmed display alias for a mandate. Returns false
+ *  (never throws) if the mandate doesn't exist or isn't owned by this user. */
+export async function confirmCollectorAlias(
+  userId: string,
+  mandateId: string,
+  alias: string,
+  client: Prisma.TransactionClient | typeof prisma = prisma,
+): Promise<boolean> {
+  const trimmed = alias.trim();
+  if (!trimmed) return false;
+  const result = await client.directDebitMandate.updateMany({ where: { id: mandateId, userId }, data: { merchantAlias: trimmed } });
+  return result.count > 0;
 }

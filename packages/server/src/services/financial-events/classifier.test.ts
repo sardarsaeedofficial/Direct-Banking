@@ -228,3 +228,46 @@ describe("Final release completion — pinned real-world notification wording", 
     expect(r.amountMinor).toBe(185000);
   });
 });
+
+// Direct Debit Intelligence & Reconciliation round (§2/§3/§10): the real-
+// device Manchester City Council notification wording, plus the specific
+// upcoming/scheduled-collection phrases named in the brief that were not
+// already covered by the existing FUTURE_RE phrase set.
+describe("Direct Debit Intelligence — upcoming-phrase detection, collector normalisation, category hints", () => {
+  const base = { sourcePackage: "unknown.monzo", trustedSource: false, occurredAt: new Date("2026-08-11T10:00:00Z") };
+
+  it("'MANCHESTER C C leaves your account on 16 August: £170.00' -> UPCOMING DIRECT_DEBIT with a clean collector name", () => {
+    const r = classifyNotification({ ...base, title: "MANCHESTER C C", text: "leaves your account on 16 August: £170.00 Direct Debit" });
+    expect(r.lifecycle).toBe("UPCOMING");
+    expect(r.eventKind).toBe("DIRECT_DEBIT");
+    expect(r.merchantName).toBe("MANCHESTER C C");
+    expect(r.amountMinor).toBe(17000);
+    expect(r.collectorCategoryHint).toBe("COUNCIL_TAX");
+  });
+
+  it("'Capital One is due to leave your account: £254.43' -> UPCOMING", () => {
+    const r = classifyNotification({ ...base, title: "Capital One", text: "is due to leave your account: £254.43 repayment of your statement balance" });
+    expect(r.lifecycle).toBe("UPCOMING");
+  });
+
+  it("'We will take £82.00 for British Gas tomorrow' -> UPCOMING (explicit 'we will take', not just 'we'll')", () => {
+    const r = classifyNotification({ ...base, title: "British Gas", text: "We will take £82.00 tomorrow" });
+    expect(r.lifecycle).toBe("UPCOMING");
+    expect(r.collectorCategoryHint).toBe("UTILITIES");
+  });
+
+  it("a genuinely completed Direct Debit is never reclassified as upcoming by the new phrases", () => {
+    const r = classifyNotification({ ...base, title: "Manchester C C", text: "has left your account -£170.00", clientDirection: "EXPENSE", clientAmountMinor: 17000, clientConfidence: 0.9 });
+    expect(r.lifecycle).toBe("COMPLETED");
+  });
+
+  it("cleans a truncated/garbled on-device merchant hint down to the collector name", () => {
+    const r = classifyNotification({ ...base, title: "Manchester C C Leaves Your", text: "-£170.00 Direct debit", merchantHint: "Manchester C C Leaves Your" });
+    expect(r.merchantName).toBe("Manchester C C");
+  });
+
+  it("does not assign a category hint for an unrecognised collector", () => {
+    const r = classifyNotification({ ...base, title: "Zable Card", text: "Your monthly repayment of £254.43 will be taken" });
+    expect(r.collectorCategoryHint).toBeNull();
+  });
+});

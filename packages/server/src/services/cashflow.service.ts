@@ -47,16 +47,29 @@ export async function upcomingPayments(userId: string, days: number, now: Date =
   // Canonical recurring commitments (DD, subscriptions, standing orders, recurring card).
   const mandates = await prisma.directDebitMandate.findMany({
     where: { userId, status: { in: ["ACTIVE", "UNKNOWN"] }, nextExpectedAt: { gte: startOfUtcDay(now), lte: until } },
-    select: { id: true, companyName: true, kind: true, nextExpectedAt: true, expectedAmountMinor: true, userExpectedAmountMinor: true, lastAmountMinor: true },
+    select: { id: true, companyName: true, merchantAlias: true, kind: true, nextExpectedAt: true, expectedAmountMinor: true, userExpectedAmountMinor: true, lastAmountMinor: true, paymentCount: true, userExpectedDate: true },
   });
   const items: UpcomingPayment[] = mandates.map((m) => ({
     id: m.id,
-    name: m.companyName,
+    // A user-confirmed display alias (§12) always wins for display; mandate
+    // identity/matching is keyed on normalizedCompanyName, never this field.
+    name: m.merchantAlias ?? m.companyName,
     source: m.kind as UpcomingSource,
     amountMinor: m.userExpectedAmountMinor ?? m.expectedAmountMinor ?? m.lastAmountMinor ?? 0,
     currency,
     dueIso: m.nextExpectedAt!.toISOString(),
-    label: "Expected",
+    // Direct Debit Intelligence & Reconciliation round (§7/§19): a mandate
+    // with EXACTLY one observed payment has had its next date generated
+    // purely from a default cadence assumption (recomputeMandate() has no
+    // real interval to learn from yet — see direct-debit.service.ts) — real
+    // recurring evidence needs at least a second payment to confirm the
+    // interval. Never downgrades a mandate with zero payments (e.g. one
+    // seeded directly from a bank's own UPCOMING pre-alert via
+    // recordUpcomingDirectDebitLike(), or a manually configured commitment —
+    // both are genuine evidence on their own, just not "learned from
+    // history" yet) or a user-confirmed next date, which is explicit
+    // evidence regardless of payment count.
+    label: m.paymentCount === 1 && !m.userExpectedDate ? "Forecast" : "Expected",
   }));
 
   // Phase-1 expected payments (manual recurring / projected).
@@ -152,15 +165,41 @@ export interface SafeToSpend {
   minReserveMinor: number;
   safeToSpendMinor: number;
   label: "Estimate";
+  // Direct Debit Intelligence & Reconciliation round (§6/§19): the horizon
+  // was previously an unlabelled implementation detail (a bare literal `30`
+  // passed to upcomingPayments()) — documented and surfaced explicitly here
+  // so a client can render "Safe to spend over next 30 days (until 21 Sep)"
+  // instead of a bare figure with no stated meaning. This is the audited,
+  // INTENDED existing horizon (a rolling window from `now`, not "until the
+  // end of the current calendar month") — deliberately left as-is rather
+  // than silently changed; see cashFlowForecast()'s separate endOfMonth
+  // figure for that alternative framing.
+  horizonDays: number;
+  horizonEndIso: string;
+  // Exactly which unresolved occurrences are reducing the figure — lets a
+  // user spot a bad prediction immediately instead of only seeing one
+  // opaque total (§19). Only HIGH-confidence ("Expected") items are ever
+  // counted in upcomingCommittedMinor; low-confidence single-payment
+  // forecasts are listed for transparency elsewhere (upcomingPayments()) but
+  // never silently reserved against Safe-to-Spend.
+  contributingItems: UpcomingPayment[];
 }
 
 /** Safe-to-spend = available − upcoming committed (next 30 days) − configurable
- *  minimum reserve. Clearly an estimate. */
+ *  minimum reserve. Clearly an estimate.
+ *
+ *  Only counts HIGH-confidence upcoming obligations toward the committed
+ *  figure (§5/§7): a completed payment, a settled expected occurrence, a
+ *  cancelled/failed Direct Debit, or a single-payment mandate's own
+ *  automatic next-cycle GUESS (label "Forecast" — see upcomingPayments())
+ *  must never silently reduce what the user is told is safe to spend. */
 export async function safeToSpend(userId: string, minReserveMinor = 0, now: Date = new Date()): Promise<SafeToSpend> {
   const currency = await primaryCurrencyFor(userId);
   const available = await availableBalanceMinor(userId, currency);
-  const upcoming = await upcomingPayments(userId, 30, now);
-  const committed = upcoming.reduce((s, i) => s + i.amountMinor, 0);
+  const horizonDays = 30;
+  const upcoming = await upcomingPayments(userId, horizonDays, now);
+  const contributingItems = upcoming.filter((i) => i.label === "Expected");
+  const committed = contributingItems.reduce((s, i) => s + i.amountMinor, 0);
   return {
     currency,
     availableMinor: available,
@@ -168,6 +207,9 @@ export async function safeToSpend(userId: string, minReserveMinor = 0, now: Date
     minReserveMinor,
     safeToSpendMinor: available - committed - minReserveMinor,
     label: "Estimate",
+    horizonDays,
+    horizonEndIso: new Date(now.getTime() + horizonDays * DAY).toISOString(),
+    contributingItems,
   };
 }
 

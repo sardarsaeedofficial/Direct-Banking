@@ -7,6 +7,8 @@ import {
   classifyAnomaly,
   effectiveExpectation,
   medianIntervalDays,
+  normaliseCollectorDisplayName,
+  collectorCategoryHint,
 } from "./direct-debit.service.js";
 
 describe("normaliseCompany", () => {
@@ -98,5 +100,57 @@ describe("effectiveExpectation", () => {
   it("prefers the user override over the learned value", () => {
     const e = effectiveExpectation(mandate({ expectedAmountMinor: 8000, userExpectedAmountMinor: 3400 }));
     expect(e.point).toBe(3400);
+  });
+});
+
+describe("normaliseCollectorDisplayName — §3 collector/merchant normalisation", () => {
+  it("strips a trailing 'Leaves Your' fragment from a truncated on-device merchant guess", () => {
+    expect(normaliseCollectorDisplayName("Manchester C C Leaves Your")).toBe("Manchester C C");
+  });
+  it("strips 'leaves your account ending NNNN this week' down to the collector name", () => {
+    expect(normaliseCollectorDisplayName("MANCHESTER C C leaves your account ending 7164 this week")).toBe("MANCHESTER C C");
+  });
+  it("strips 'will leave' wording", () => {
+    expect(normaliseCollectorDisplayName("Manchester City Council will leave your account")).toBe("Manchester City Council");
+  });
+  it("strips 'is due to leave' wording", () => {
+    expect(normaliseCollectorDisplayName("Capital One is due to leave your account")).toBe("Capital One");
+  });
+  it("leaves an ordinary clean collector name unchanged (safe no-op)", () => {
+    expect(normaliseCollectorDisplayName("CAPITAL ONE")).toBe("CAPITAL ONE");
+    expect(normaliseCollectorDisplayName("Zable Card")).toBe("Zable Card");
+    expect(normaliseCollectorDisplayName("TESCO STORES 3245")).toBe("TESCO STORES 3245");
+  });
+  it("never collapses to an empty string — falls back to the original text", () => {
+    expect(normaliseCollectorDisplayName("Leaves")).toBe("Leaves");
+  });
+  it("handles null/empty input safely", () => {
+    expect(normaliseCollectorDisplayName(null)).toBeNull();
+    expect(normaliseCollectorDisplayName("")).toBeNull();
+    expect(normaliseCollectorDisplayName("   ")).toBeNull();
+  });
+});
+
+describe("collectorCategoryHint — §10 reusable collector category intelligence", () => {
+  it("recognises a council/local-authority collector", () => {
+    expect(collectorCategoryHint("Manchester City Council")).toBe("COUNCIL_TAX");
+    expect(collectorCategoryHint("MANCHESTER C C")).toBe("COUNCIL_TAX");
+  });
+  it("recognises an insurance collector", () => {
+    expect(collectorCategoryHint("Admiral Insurance")).toBe("INSURANCE");
+  });
+  it("recognises a utility collector", () => {
+    expect(collectorCategoryHint("British Gas")).toBe("UTILITIES");
+    expect(collectorCategoryHint("Octopus Energy")).toBe("UTILITIES");
+  });
+  it("recognises a communications collector", () => {
+    expect(collectorCategoryHint("Vodafone")).toBe("COMMUNICATIONS");
+  });
+  it("recognises a well-known subscription collector", () => {
+    expect(collectorCategoryHint("Netflix")).toBe("SUBSCRIPTION");
+  });
+  it("returns null for an unrecognised collector — never guesses", () => {
+    expect(collectorCategoryHint("Zable Card")).toBeNull();
+    expect(collectorCategoryHint(null)).toBeNull();
   });
 });

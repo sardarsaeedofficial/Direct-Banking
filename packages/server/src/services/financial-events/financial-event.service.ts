@@ -141,6 +141,71 @@ async function findMatchingPendingEvent(
 }
 
 /**
+ * Direct Debit Intelligence & Reconciliation round (§4) — find an existing
+ * UPCOMING occurrence (typically seeded from an earlier bank pre-alert via
+ * recordUpcomingDirectDebitLike()) that a genuinely completed Direct Debit
+ * notification should resolve, instead of leaving it stuck at lifecycle=
+ * UPCOMING forever while a second, disconnected FinancialEvent gets created
+ * for the very same real-world payment (the root cause of a settled Direct
+ * Debit still looking "upcoming").
+ *
+ * Weighted evidence, strongest first — a bare merchant/collector NAME match
+ * is never sufficient on its own (§4):
+ *   Tier 1: same resolved DirectDebitMandate + same account + exact amount
+ *           -> HIGH (the mandate identity already IS the collector identity)
+ *   Tier 2: same normalised collector + same account + exact amount, within
+ *           the date window -> HIGH/MEDIUM
+ * Only these HIGH-confidence tiers are ever auto-reconciled; anything
+ * weaker is deliberately left alone — a new, separate, reviewable
+ * FinancialEvent is created instead of guessing a link.
+ */
+async function findMatchingUpcomingDirectDebitEvent(
+  userId: string,
+  candidate: { accountId: string; amountMinor: number | null; merchantName: string | null; occurredAt: Date; directDebitMandateId: string | null },
+  client: Prisma.TransactionClient,
+): Promise<FinancialEvent | null> {
+  if (candidate.amountMinor == null) return null;
+  // A bank's own pre-alert can arrive days before the money actually moves,
+  // and the eventual collection date can drift a little either way of what
+  // was originally quoted — much wider than the same-day PENDING window
+  // above, but still bounded: an UPCOMING row further out than this is far
+  // more likely a stale/unrelated prediction than genuine evidence for this
+  // specific payment.
+  const windowMs = 10 * 24 * 60 * 60 * 1000; // 10 days
+  const rows = await client.financialEvent.findMany({
+    where: {
+      userId,
+      accountId: candidate.accountId,
+      lifecycle: "UPCOMING",
+      OR: [
+        { expectedAt: { gte: new Date(candidate.occurredAt.getTime() - windowMs), lte: new Date(candidate.occurredAt.getTime() + windowMs) } },
+        { expectedAt: null },
+      ],
+    },
+    orderBy: { occurredAt: "desc" },
+    take: 10,
+  });
+  if (rows.length === 0) return null;
+
+  // Tier 1: an UPCOMING row already tied to the SAME resolved mandate.
+  if (candidate.directDebitMandateId) {
+    const mandateMatch = rows.find((r) => r.directDebitMandateId === candidate.directDebitMandateId && r.amountMinor === candidate.amountMinor);
+    if (mandateMatch) return mandateMatch;
+  }
+
+  // Tier 2: same normalised collector text + exact amount (no resolved
+  // mandate id available yet — e.g. the very first UPCOMING pre-alert for a
+  // brand-new collector).
+  const normCandidate = candidate.merchantName ? normaliseCompany(candidate.merchantName) : "";
+  if (normCandidate) {
+    const collectorMatch = rows.find((r) => r.merchantName && normaliseCompany(r.merchantName) === normCandidate && r.amountMinor === candidate.amountMinor);
+    if (collectorMatch) return collectorMatch;
+  }
+
+  return null;
+}
+
+/**
  * Seed/update a Direct-Debit-like mandate (DIRECT_DEBIT or
  * CREDIT_CARD_REPAYMENT) from an UPCOMING pre-alert, before any real payment
  * has ever been linked. Reuses the exact same mandate identity
@@ -467,10 +532,36 @@ export async function ingestFinancialEvent(
     isInternalTransferCandidate: internalTransferCandidate,
   });
   reasons.push(analytics.reason);
+  // Collector category intelligence (§10) — advisory-only reason code, never
+  // a real Category id; see collectorCategoryHint() in direct-debit.service.ts.
+  if (classified.collectorCategoryHint) reasons.push(`COLLECTOR_CATEGORY_${classified.collectorCategoryHint}`);
 
   let matched: FinancialEvent | null = null;
   if (classified.lifecycle === "COMPLETED" || classified.lifecycle === "DECLINED" || classified.lifecycle === "FAILED" || classified.lifecycle === "REVERSED") {
     matched = await findMatchingPendingEvent(userId, { accountId: input.accountId, amountMinor: classified.amountMinor, merchantName: classified.merchantName, occurredAt: input.occurredAt }, client);
+  }
+  // Direct Debit Intelligence & Reconciliation round (§4): a genuinely
+  // COMPLETED Direct-Debit-rail payment may resolve an earlier UPCOMING
+  // occurrence (typically seeded from a bank pre-alert) instead of creating
+  // a brand-new, disconnected FinancialEvent for the same real-world
+  // payment — this is the fix for a settled Direct Debit still showing as
+  // "upcoming" forever. Never attempted for a non-Direct-Debit payment rail
+  // (a card purchase's PENDING matching above already covers same-day
+  // pending->settled; this is specifically the pre-alert->settled case).
+  if (!matched && classified.lifecycle === "COMPLETED" && (effectivePaymentRail === "DIRECT_DEBIT" || effectiveEventKind === "DIRECT_DEBIT" || effectiveEventKind === "CREDIT_CARD_REPAYMENT")) {
+    const normalizedCollector = normaliseCompany(classified.merchantName);
+    const existingMandate = normalizedCollector
+      ? await client.directDebitMandate.findUnique({
+          where: { userId_accountId_normalizedCompanyName: { userId, accountId: input.accountId, normalizedCompanyName: normalizedCollector } },
+          select: { id: true },
+        })
+      : null;
+    matched = await findMatchingUpcomingDirectDebitEvent(
+      userId,
+      { accountId: input.accountId, amountMinor: classified.amountMinor, merchantName: classified.merchantName, occurredAt: input.occurredAt, directDebitMandateId: existingMandate?.id ?? null },
+      client,
+    );
+    if (matched) reasons.push("RECONCILED_UPCOMING_DIRECT_DEBIT_OCCURRENCE");
   }
 
   let eventRow: FinancialEvent;
@@ -620,6 +711,16 @@ export async function ingestFinancialEvent(
         );
       }
     }
+
+    // Re-fetch: several branches above (mandate attach/link, internal-
+    // transfer pairing, Direct Debit detection) mutate the transaction row
+    // directly via client.transaction.update() rather than through this
+    // function, so the in-memory snapshot captured at createTransaction()
+    // time would otherwise go stale by the time it's returned to the caller
+    // (e.g. a correctly-linked directDebitMandateId/transactionType in the
+    // database, but still null/undefined on the object this function
+    // actually hands back).
+    transaction = (await client.transaction.findUnique({ where: { id: transaction.id }, include: { merchant: true, category: true, account: true } })) ?? transaction;
 
     eventRow = await client.financialEvent.update({ where: { id: eventRow.id }, data: { linkedTransactionId: transaction.id, settledAt: input.occurredAt } });
   } else if ((classified.lifecycle === "REFUNDED" || classified.lifecycle === "REVERSED") && classified.amountMinor) {

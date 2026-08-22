@@ -1,4 +1,4 @@
-import { looksLikeDirectDebit } from "../direct-debit.service.js";
+import { looksLikeDirectDebit, normaliseCollectorDisplayName, collectorCategoryHint, type CollectorCategoryGroup } from "../direct-debit.service.js";
 
 // ---------------------------------------------------------------------------
 // NotificationFinancialClassifier — Financial Event Intelligence
@@ -73,6 +73,11 @@ export interface ClassifierResult {
   confidenceScore: number;
   confidenceLevel: ConfidenceLevel;
   reasonCode: string;
+  /** Best-effort, non-authoritative economic-category hint for a collector
+   *  (Direct Debit Intelligence round §10) — never a real Category id, only
+   *  ever surfaced as an explanatory reason code. Null when no known pattern
+   *  matches (see collectorCategoryHint() in direct-debit.service.ts). */
+  collectorCategoryHint: CollectorCategoryGroup | null;
 }
 
 // ---- Phrase libraries (§15–17 of the brief) --------------------------------
@@ -108,7 +113,16 @@ const CARD_AUTH_HOLD_RE = /\bon\s+card\s+ending\b.{0,100}\b(?:that\s+leaves|avai
 const FUTURE_RE = new RegExp(
   [
     "we'?ll\\s+(?:take|collect)",
+    "we\\s+will\\s+(?:take|collect)",
     "will\\s+(?:take|leave|be\\s+taken|be\\s+collected)",
+    // "leaves your account ON <date>" is a scheduled-collection pre-alert
+    // (e.g. "MANCHESTER C C leaves your account on 16 September") — distinct
+    // from the bare present-tense "X leaves your account" some banks also use
+    // AFTER a debit has actually posted (already handled by COMPLETION_RE's
+    // "has left your account"), so the trailing "on" is required here rather
+    // than matching "leaves your account" unconditionally.
+    "leaves?\\s+your\\s+account\\s+on\\b",
+    "\\bis\\s+due\\s+to\\s+leave\\b",
     "\\bdue\\s+on\\b",
     "\\bscheduled\\s+for\\b",
     "\\bexpected\\s+on\\b",
@@ -332,13 +346,23 @@ export function extractExpectedDate(text: string, occurredAt: Date): Date | null
   return null;
 }
 
+// Direct Debit Intelligence & Reconciliation round (§2): payment RAIL
+// (how the money moved — Direct Debit/card/standing order/cash) and
+// economic PURPOSE (what the payment is FOR — a subscription, a standing
+// order, a repayment, an ordinary bill) are independent facts about the
+// same payment, never conflated. A notification frequently mentions BOTH
+// ("Netflix subscription, Direct Debit £15.99") — the more specific economic
+// PURPOSE always wins as eventKind, with paymentRail set to whichever rail
+// the text actually evidences, defaulting only when the text says nothing
+// about it at all.
 function detectEventKind(text: string, isDeclineLike: boolean): { eventKind: FinEventKind; paymentRail: PaymentRail | null } {
+  const isDirectDebit = looksLikeDirectDebit(text);
   if (CREDIT_CARD_REPAYMENT_RE.test(text)) {
-    return { eventKind: "CREDIT_CARD_REPAYMENT", paymentRail: looksLikeDirectDebit(text) ? "DIRECT_DEBIT" : null };
+    return { eventKind: "CREDIT_CARD_REPAYMENT", paymentRail: isDirectDebit ? "DIRECT_DEBIT" : null };
   }
-  if (looksLikeDirectDebit(text)) return { eventKind: "DIRECT_DEBIT", paymentRail: "DIRECT_DEBIT" };
-  if (STANDING_ORDER_RE.test(text)) return { eventKind: "STANDING_ORDER", paymentRail: "STANDING_ORDER" };
-  if (SUBSCRIPTION_RE.test(text)) return { eventKind: "SUBSCRIPTION", paymentRail: "CARD" };
+  if (STANDING_ORDER_RE.test(text)) return { eventKind: "STANDING_ORDER", paymentRail: isDirectDebit ? "DIRECT_DEBIT" : "STANDING_ORDER" };
+  if (SUBSCRIPTION_RE.test(text)) return { eventKind: "SUBSCRIPTION", paymentRail: isDirectDebit ? "DIRECT_DEBIT" : "CARD" };
+  if (isDirectDebit) return { eventKind: "DIRECT_DEBIT", paymentRail: "DIRECT_DEBIT" };
   if (CASH_WITHDRAWAL_RE.test(text)) return { eventKind: "CASH_WITHDRAWAL", paymentRail: "CASH" };
   if (!isDeclineLike && REFUND_KIND_RE.test(text)) return { eventKind: "REFUND", paymentRail: null };
   if (REVERSED_RE.test(text)) return { eventKind: "REVERSAL", paymentRail: null };
@@ -399,7 +423,15 @@ function computeConfidence({ reasonCode, trustedSource, clientConfidence }: Conf
  */
 export function classifyNotification(input: ClassifierInput): ClassifierResult {
   const text = `${input.title} ${input.text}`.trim();
-  const merchant = input.merchantHint ?? extractMerchant(text) ?? (input.title || null);
+  // Direct Debit Intelligence round (§3): whichever source produced a
+  // candidate merchant/collector string — the caller's own on-device hint,
+  // the "to/from X" text extraction below, or the notification's raw title —
+  // it may still carry trailing notification wording ("Manchester C C Leaves
+  // Your" rather than "Manchester C C"). Cleaning it here, once, keeps every
+  // downstream consumer (display, DirectDebitMandate identity/normaliseCompany,
+  // AI advisory input) working from the same clean collector name. Safe
+  // no-op for ordinary merchant names that never contained such wording.
+  const merchant = normaliseCollectorDisplayName(input.merchantHint ?? extractMerchant(text) ?? (input.title || null));
 
   if (NON_FINANCIAL_RE.test(text) && !DECLINED_RE.test(text) && !FAILED_RE.test(text) && !hasFutureLanguage(text) && !COMPLETION_RE.test(text) && !looksLikeDirectDebit(text)) {
     return {
@@ -415,6 +447,7 @@ export function classifyNotification(input: ClassifierInput): ClassifierResult {
       confidenceScore: input.trustedSource ? 0.9 : 0.6,
       confidenceLevel: input.trustedSource ? "HIGH" : "MEDIUM",
       reasonCode: "NON_FINANCIAL_PHRASE",
+      collectorCategoryHint: null,
     };
   }
 
@@ -466,5 +499,6 @@ export function classifyNotification(input: ClassifierInput): ClassifierResult {
     confidenceScore: confidence.score,
     confidenceLevel: confidence.level,
     reasonCode,
+    collectorCategoryHint: collectorCategoryHint(merchant),
   };
 }
